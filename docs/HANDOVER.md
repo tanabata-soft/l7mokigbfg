@@ -25,6 +25,10 @@ HANDOVER.md更新： 済
 5. カタログ番号 NK-S009、ジャンル名（Flavor＝Pop Ballad／あなた＝R&B Ballad）も確定。
 - アプリの表示内容に変更はないため、版数は v1.0.0 のまま初回公開とした。
 
+## 公開記録
+
+- v1.0.0 初回公開（2026-11-13）: 公開リポジトリ tanabata-soft/l7mokigbfg を新規作成（ランダム名、公開）。Pages は GitHub Actions 配信で有効化。protect-main ルールセット（PR必須・force push禁止・削除ブロック・必須チェックは check のみ）を NK-S006 と同内容で設定。公開前のローカル検証は `npm run verify` 通過・`npm run test:e2e` 15/15 通過（再実行済み）。
+
 ## 今の状態
 
 - デジタルCD制作サービス 無料モニター1件目。『Flavor』（カタログ番号 NK-S009）デジタルシングルCD。申込者 nami、自分用。公開リポジトリ tanabata-soft/l7mokigbfg（Pages: https://tanabata-soft.github.io/l7mokigbfg/）。アプリID `flavor-single`、音源キャッシュ名 `flavor-single-audio`、テーマ色 #141416（モノクロのチャコール）。
