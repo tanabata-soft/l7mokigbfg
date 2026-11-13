@@ -1,13 +1,13 @@
 # 引き継ぎメモ
 
-更新: 2026-11-13・版 v1.0.0（公開済み）
+更新: 2026-11-13・版 v1.0.0（納品済み）
 
 【デジタルCD台帳反映用レポート】
 カタログ番号： NK-S009
 タイトル： Flavor
 形態： シングル
 制作担当： Muse
-状態： 公開済み（申込者への納品案内は未送信）
+状態： 納品済み（納品案内送信済み 2026-11-13）
 現行バージョン： 1.0.0
 リポジトリ： tanabata-soft/l7mokigbfg
 公開URL： https://tanabata-soft.github.io/l7mokigbfg/
@@ -29,9 +29,13 @@ HANDOVER.md更新： 済
 
 - v1.0.0 初回公開（2026-11-13）: 公開リポジトリ tanabata-soft/l7mokigbfg を新規作成（ランダム名、公開）。Pages は GitHub Actions 配信で有効化。protect-main ルールセット（PR必須・force push禁止・削除ブロック・必須チェックは check のみ）を NK-S006 と同内容で設定。公開前のローカル検証は `npm run verify` 通過・`npm run test:e2e` 15/15 通過（再実行済み）。
 
+## 納品記録
+
+- 納品案内送信済み（2026-11-13）: 申込者 nami さんの連絡先メール宛に、作品ページのURL、Google ドライブ共有リンク、使用後アンケートのURLを送った。Google ドライブの共有フォルダは「『Flavor』納品ファイル（NK-S009）」で、納品案内PDFと単体ファイルを格納している。共有は、リンクを知っている人が閲覧できる形にした。
+
 ## 今の状態
 
-- デジタルCD制作サービス 無料モニター1件目。『Flavor』（カタログ番号 NK-S009）デジタルシングルCD。申込者 nami、自分用。公開リポジトリ tanabata-soft/l7mokigbfg（Pages: https://tanabata-soft.github.io/l7mokigbfg/）。アプリID `flavor-single`、音源キャッシュ名 `flavor-single-audio`、テーマ色 #141416（モノクロのチャコール）。
+- デジタルCD制作サービス 無料モニター1件目。『Flavor』（カタログ番号 NK-S009）デジタルシングルCD。申込者 nami、自分用。公開リポジトリ tanabata-soft/l7mokigbfg（Pages: https://tanabata-soft.github.io/l7mokigbfg/）。アプリID `flavor-single`、音源キャッシュ名 `flavor-single-audio`、テーマ色 #141416（モノクロのチャコール）。2026-11-13 に納品案内を送信し、納品完了。
 - 収録: 全2曲／総再生時間 6:22。
   1. Flavor（表題曲）2:49 — 支給 m4a（Opus 48kHz）を AAC 192kbps に変換し、末尾の無音を詰めて 169.0 秒に。音量は全体で -16.1 LUFS に揃えた（-0.7dB）。
   2. あなた（カップリング）3:33 — 同様に変換し 212.9 秒に。-16.0 LUFS（+0.2dB）。ボーナストラックなし。
@@ -41,11 +45,11 @@ HANDOVER.md更新： 済
 
 ## やりかけ
 
-- なし（公開まで完了）。
+- なし（納品まで完了）。
 
 ## 次にやること（優先順）
 
-1. 申込者（nami さん）への納品案内の送信（親側で別途対応。このリポジトリ側の作業ではない）。
+- なし（納品まで完了）。
 
 ## 注意・気づいたこと
 
