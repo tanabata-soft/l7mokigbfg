@@ -1,6 +1,6 @@
 # 引き継ぎメモ
 
-更新: 2026-11-13・版 v1.0.0（納品済み）
+更新: 2026-11-13・版 v1.0.1（納品済み）
 
 【デジタルCD台帳反映用レポート】
 カタログ番号： NK-S009
@@ -8,7 +8,7 @@
 形態： シングル
 制作担当： Muse
 状態： 納品済み（納品案内送信済み 2026-11-13）
-現行バージョン： 1.0.0
+現行バージョン： 1.0.1
 リポジトリ： tanabata-soft/l7mokigbfg
 公開URL： https://tanabata-soft.github.io/l7mokigbfg/
 収録曲数： 2
@@ -28,6 +28,13 @@ HANDOVER.md更新： 済
 ## 公開記録
 
 - v1.0.0 初回公開（2026-11-13）: 公開リポジトリ tanabata-soft/l7mokigbfg を新規作成（ランダム名、公開）。Pages は GitHub Actions 配信で有効化。protect-main ルールセット（PR必須・force push禁止・削除ブロック・必須チェックは check のみ）を NK-S006 と同内容で設定。公開前のローカル検証は `npm run verify` 通過・`npm run test:e2e` 15/15 通過（再実行済み）。
+
+## v1.0.1（2026-11-13）ホーム画面の名前の修正
+
+- 不具合: ホーム画面に追加したアイコンの名前が「テンプレート」になる（オーナーの実機で発覚）。
+- 原因: vite.config.ts の PWA manifest の short_name に、テンプレートの仮名『テンプレート』が残っていた。あわせて manifest と index.html の description にも、テンプレートの雛形文言が残っていた。
+- 対策: vite.config.ts の APP_NAME を作品名そのもの（『Flavor』）に改め、manifest の name／short_name を APP_NAME に統一した。description は作品の説明文に差し替えた。恒久対策として、制作側の scripts/content-checks.mjs に manifest-name 検査を追加（テンプレートの仮名の残存と、APP_NAME と作品名の食い違いを `npm run verify` で止める）。テンプレートリポジトリ側にも同じ検査と、docs/PRODUCTION.md への注意書きを反映した。
+- 注意: すでにホーム画面に追加済みのアイコンは、名前が自動では変わらない。名前を直すには追加し直しが必要。
 
 ## 納品記録
 
