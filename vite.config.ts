@@ -6,7 +6,10 @@ import { VitePWA } from 'vite-plugin-pwa';
 const { version, name: appId } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string; name: string };
 
 // アプリ名・色はここと index.html の2か所だけ。新しいアプリを作るときに書き換える。
-const APP_NAME = 'Flavor ― デジタルシングルCD';
+// APP_NAME はホーム画面に出る名前（manifest の name／short_name）なので、作品名そのものにする。
+// index.html の <title> と apple-mobile-web-app-title は「APP_NAME ― 形式名」の形でそろえる
+// （scripts/content-checks.mjs の app-name／manifest-name 検査が食い違いを止める）。
+const APP_NAME = 'Flavor';
 const THEME_COLOR = '#141416';
 const BACKGROUND_COLOR = '#141416';
 // 音源の実行時キャッシュ名。src/download.ts（初回一括ダウンロード）も同じ名前を使う（define で埋め込む）。
@@ -35,8 +38,8 @@ export default defineConfig({
       includeAssets: ['icons/apple-touch-icon.png', 'icons/icon-192.png'],
       manifest: {
         name: APP_NAME,
-        short_name: 'テンプレート',
-        description: 'デジタルCDエンジン（テンプレート）の雛形作品',
+        short_name: APP_NAME,
+        description: 'nami のデジタルシングルCD『Flavor』。表題曲「Flavor」とカップリング「あなた」の2曲を収録。',
         lang: 'ja',
         display: 'standalone',
         start_url: './',
