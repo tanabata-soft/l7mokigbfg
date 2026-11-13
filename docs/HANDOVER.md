@@ -28,6 +28,7 @@ HANDOVER.md更新： 済
 ## 公開記録
 
 - v1.0.0 初回公開（2026-11-13）: 公開リポジトリ tanabata-soft/l7mokigbfg を新規作成（ランダム名、公開）。Pages は GitHub Actions 配信で有効化。protect-main ルールセット（PR必須・force push禁止・削除ブロック・必須チェックは check のみ）を NK-S006 と同内容で設定。公開前のローカル検証は `npm run verify` 通過・`npm run test:e2e` 15/15 通過（再実行済み）。
+- v1.0.1 公開（2026-11-13）: ホーム画面の名前の修正（下記「v1.0.1」の項）。PR #5 を squash マージ（マージコミット 57dd48a）。CI は check・e2e ともに通過。Pages の再デプロイ成功を確認し、配信された成果物の manifest が name／short_name ともに『Flavor』で、配信物に『テンプレート』の文字列が無く、版数 1.0.1 を含むことを確認した。単体ファイルも再生成して差し替え済み（your_files と、ドライブの納品フォルダ内の『Flavor』単体ファイル.html。ファイルIDは維持）。
 
 ## v1.0.1（2026-11-13）ホーム画面の名前の修正
 
