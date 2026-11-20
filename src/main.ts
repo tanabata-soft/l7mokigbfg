@@ -13,6 +13,7 @@ import {
   prevIndex,
 } from './logic';
 import { exposeTestApi, setData, setupDebug } from './debug';
+import { enterGameMode } from './game/game-main';
 import { setupInstallGuide } from './install';
 import { requestPersistentStorage, setupUpdateBanner } from './pwa';
 import { downloadAllAudio } from './download';
@@ -123,6 +124,12 @@ $('#btn-play-all').addEventListener('click', () => {
   playTrack(0, true);
 });
 if (!SINGLE) $('#btn-open-tracks').addEventListener('click', () => go('tracks'));
+$('#btn-open-game').addEventListener('click', () => {
+  // リズムゲームに入る時は、CD 側の再生を止める（2つの音が重ならないように）
+  audio.pause();
+  enterGameMode();
+  go('game');
+});
 
 /* ---------- 曲目（裏ジャケット） ---------- */
 function span(cls: string, text: string): HTMLSpanElement {

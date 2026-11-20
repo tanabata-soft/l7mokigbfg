@@ -57,7 +57,7 @@ export default defineConfig({
         // 音源（mp4）は容量が大きいので事前キャッシュには入れない。初回起動時にアプリが
         // 一括ダウンロードして実行時キャッシュへ入れる（src/download.ts）。再生時の取りこぼしもここで拾う。
         // 画像は表示に必須なので事前キャッシュに含める（大きめのジャケット画像に合わせて上限を引き上げる）。
-        globPatterns: ['**/*.{js,css,html,svg,png,webp,jpg,webmanifest}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,webp,jpg,mp3,wav,webmanifest}'],
         maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         navigateFallback: 'index.html',
         runtimeCaching: [
