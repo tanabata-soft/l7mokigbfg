@@ -48,9 +48,8 @@
     <section id="view-booklet" class="view">
       <div class="bar book-bar"><button class="bhome" data-go="cover" aria-label="トップに戻る"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6.5 9.5V20h11V9.5"/></svg></button><span class="ttl" id="book-ttl">ブックレット</span><span class="pg" id="pg-ind"></span></div>
       <div class="book-stage"><article class="page" id="book-page"></article></div>
-      <!-- バージョン表示とインストール入口は、カバー画面を汚さないよう奥付のあるブックレットの末尾に置く（CLAUDE.md の方針参照） -->
+      <!-- バージョン表示は、カバー画面を汚さないよう奥付のあるブックレットの末尾に置く（CLAUDE.md の方針参照）。インストール入口はトップ画面のみ -->
       <div class="book-foot">
-        <button id="install-open" type="button" class="link">📲 アプリとしてインストールする方法</button>
         <p class="muted version" id="version-line">デジタルシングルCD v<span id="version"></span></p>
       </div>
     </section>
@@ -155,7 +154,17 @@
                 <p>精度 <span id="result-accuracy"></span>%　最大コンボ <span id="result-combo"></span></p>
                 <div class="row">
                   <button id="again-button" type="button" class="opt">もう一度</button>
+                  <button id="next-button" type="button" class="opt">次の曲</button>
                   <button id="back-button" type="button" class="opt">メニューへ</button>
+                </div>
+              </section>
+              <!-- 中断の確認カード（演奏を凍結して出す。NK-001 v1.2.7 で標準化） -->
+              <section id="pause-screen" class="card result pause" hidden aria-live="polite">
+                <p class="pause-title">演奏を中断しますか？</p>
+                <p class="pause-note">スコアは記録されません</p>
+                <div class="row">
+                  <button id="pause-resume-button" type="button" class="opt">つづける</button>
+                  <button id="pause-abort-button" type="button" class="opt danger">メニューに戻る</button>
                 </div>
               </section>
               <p id="game-live" class="sr-only" aria-live="polite"></p>

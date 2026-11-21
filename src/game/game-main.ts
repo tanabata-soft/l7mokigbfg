@@ -28,12 +28,13 @@ import {
   setDebug,
   type DebugAction,
 } from '../debug';
-import { isSoundOn, playSwipeSound, playUiClick, preloadHitSample, setSound } from './sound';
+import { detectPlatform } from '../install';
+import { isSoundOn, playResultJingle, playSwipeSound, playUiClick, preloadHitSample, setSound } from './sound';
 import { isVibrateOn, setVibrate } from './haptics';
 import { audioContext, audioState, isUnlocked, unlockAudio } from './audio';
 import { load, migrateStorage, requestPersist, save } from './storage';
 
-function initGameMode(): { enter: () => void } {
+function initGameMode(): { enter: () => void; exit: () => void } {
 
   const $ = <T extends HTMLElement>(id: string): T => {
     const el = document.getElementById(id);
@@ -83,6 +84,8 @@ function initGameMode(): { enter: () => void } {
     // 結果は演奏画面の上に重ねるので、結果表示中も演奏画面は出したままにする
     $('game-screen').hidden = next === 'menu';
     $('result-screen').hidden = next !== 'result';
+    // 中断の確認カードは画面遷移では必ず閉じる（開くのは Game 側の onPause だけ）
+    $('pause-screen').hidden = true;
     setData('screen', next);
   }
 
@@ -109,6 +112,11 @@ function initGameMode(): { enter: () => void } {
     img.alt = '';
     img.draggable = false;
     if (entry.slidePosition) img.style.objectPosition = entry.slidePosition;
+    // 紙枠（frameInset）がある絵は、枠がスライドの外に出るよう拡大して表示する
+    // （ゲーム中の絵は game.ts が同じ frameInset で切り抜いている。選曲画面も揃える）
+    if (entry.frameInset > 0) {
+      img.style.transform = `scale(${1024 / (1024 - 2 * entry.frameInset)})`;
+    }
     const overlay = document.createElement('span');
     overlay.className = 'slide-overlay';
     const title = document.createElement('span');
@@ -314,16 +322,24 @@ function initGameMode(): { enter: () => void } {
     const rankEl = $('menu-best-rank');
     rankEl.textContent = rank ?? '—';
     rankEl.classList.toggle('none', !rank);
-    // 背景のぼかしジャケットを選曲に追随させる（曲が変わった時だけ、薄くフェードして差し替える）
+    // 背景のぼかしジャケットを選曲に即追随させる。以前はフェードアウト（180ms の
+    // 遅延＋0.35s の遷移）を挟んでいたため、曲を変えても前の曲の背景が一瞬残った
+    // （オーナー指摘 2026-11-21）。ジャケットはカルーセルのスライド画像として
+    // 読み込み済みのはずなので、その場で差し替える。未読込のときだけ、読み終わって
+    // から差し替える（その間は前の背景のまま。空白にはしない）。連続で切り替えた
+    // ときは、最後に選んだ曲以外は反映しない
     if (menuBgSong !== selectedSong) {
       menuBgSong = selectedSong;
       const bg = $('menu-bg');
-      bg.style.opacity = '0';
       const jacketUrl = songById(selectedSong).jacketUrl;
-      window.setTimeout(() => {
+      const img = new Image();
+      img.src = jacketUrl;
+      const apply = (): void => {
+        if (menuBgSong !== selectedSong) return;
         bg.style.backgroundImage = `url("${jacketUrl}")`;
-        bg.style.opacity = '1';
-      }, 180);
+      };
+      if (img.complete && img.naturalWidth > 0) apply();
+      else img.onload = apply;
     }
     $('offset-value').textContent = `${offsetMs > 0 ? '+' : ''}${offsetMs}ms`;
     renderToggle('vibrate-button', isVibrateOn());
@@ -544,17 +560,73 @@ function initGameMode(): { enter: () => void } {
   // ---- ゲーム ----
   const game = new Game($<HTMLCanvasElement>('game-canvas'), $<HTMLCanvasElement>('notes-canvas'), {
     onFinish: (result) => {
-      // フルコンボでも締めの演出は挟まず、結果へ直行する（フルコンボの印は
-      // 結果カードの中に出す。オーナー指示 2026-11-20）
-      showResult(result);
+      // 結果発表ジングル（アプリ内合成、オーナー指示 2026-11-21 で A 案採用）を
+      // 鳴らしてから結果カードを出す。効果音オフのときはジングルなし（待ちなし）で
+      // 即表示する。（2026-11-20 の「締めの演出は挟まず結果へ直行」はこの指示で置換。
+      // フルコンボの印は従来どおり結果カードの中に出す）
+      const waitMs = playResultJingle(result.rank);
+      if (waitMs > 0) {
+        window.setTimeout(() => showResult(result), waitMs);
+      } else {
+        showResult(result);
+      }
     },
     onAbort: () => {
       show('menu');
       renderMenu();
     },
+    onPause: (open) => {
+      $('pause-screen').hidden = !open;
+    },
     onComboShow: (combo, appearance) => showComboShow(combo, appearance),
     onLyric: (index) => showLyric(index),
   });
+
+  // ---- Android の端スワイプ「戻る」対策（v1.2.2、確認カード化は v1.2.7） ----
+  // 端スワイプの「戻る」は OS が最優先で処理するため、発動自体は止められない。
+  // 代わりに、ゲームモード中は履歴を1つ積んで popstate を捕捉し、「戻る」が
+  // 来てもアプリを閉じさせず・画面遷移もさせずに、この場に留まる。
+  // プレイ中なら、演奏を凍結して中断の確認カードを出す（オーナー指示 2026-11-21、
+  // 案1。中断ボタン・アプリ切替と同じ扱いに統一）。本当にやめる操作（メニュー
+  // 下部の「戻る」ボタン等で CD 側へ出る）ときは exit() が積んだ履歴を取り消し、
+  // 通常の「戻る」に戻す。
+  let historyGuardArmed = false;
+
+  function pushGuardState(): boolean {
+    try {
+      history.pushState({ rhythmGameGuard: true }, '');
+      return true;
+    } catch {
+      // 単体プレビュー（file: やサンドボックス）など、履歴を触れない環境では諦める
+      return false;
+    }
+  }
+
+  const onPopState = (): void => {
+    if (!historyGuardArmed) return;
+    if (!pushGuardState()) {
+      // 積み直せない環境では捕捉をやめる（この popstate 自体は素通りさせる）
+      historyGuardArmed = false;
+      window.removeEventListener('popstate', onPopState);
+    }
+    if (game.isPlaying) game.pause();
+  };
+
+  function armHistoryGuard(): void {
+    if (historyGuardArmed) return;
+    if (!pushGuardState()) return;
+    historyGuardArmed = true;
+    window.addEventListener('popstate', onPopState);
+  }
+
+  function disarmHistoryGuard(): void {
+    if (!historyGuardArmed) return;
+    historyGuardArmed = false;
+    window.removeEventListener('popstate', onPopState);
+    // 積んだ分を1つ取り消して、ゲームへ入る前の履歴状態に戻す。
+    // この back() による popstate は、リスナーを外した後なので素通りする
+    history.back();
+  }
 
   let lastEntry: SongEntry = songById(selectedSong);
   let lastDiff: Difficulty = selectedDiff;
@@ -614,9 +686,26 @@ function initGameMode(): { enter: () => void } {
     selectedDiff = lastDiff;
     void startGame();
   });
+  $('next-button').addEventListener('click', () => {
+    // 曲順（SONGS の並び＝トラック順）で次の曲へ。最後の曲の次は先頭に戻る
+    // （オーナー指示 2026-11-21）。難易度はいまの演奏のまま変えない
+    const next = SONGS[(slideIndex(lastEntry.id) + 1) % SONGS.length];
+    selectedSong = next.id;
+    selectedDiff = lastDiff;
+    save('song', selectedSong);
+    renderMenu();
+    void startGame();
+  });
   $('back-button').addEventListener('click', () => {
     show('menu');
     renderMenu();
+  });
+  // 中断の確認カード: 「つづける」は READY をはさんで再開、「メニューに戻る」は記録せずメニューへ
+  $('pause-resume-button').addEventListener('click', () => {
+    game.resume();
+  });
+  $('pause-abort-button').addEventListener('click', () => {
+    game.abort();
   });
 
   // 初回のタップで音声を unlock する（iPhone ではジェスチャの中で AudioContext を起こす必要がある）
@@ -691,13 +780,48 @@ function initGameMode(): { enter: () => void } {
     show('menu');
     renderMenu();
     scrollToSong(selectedSong, false);
+    armHistoryGuard();
+    // 端スワイプの誤発そのものを減らすため、入場時にフルスクリーンを試みる
+    // （1回目の端スワイプがシステム UI の表示で済む端末が多い）。ただし対象は
+    // Android のみ（オーナー決定 2026-11-21）: フルスクリーンは端スワイプ対策
+    // なので、ジェスチャーナビゲーションの無い PC 等では、入場時にウィンドウを
+    // 勝手に全画面にしない。非対応の環境や拒否された場合は何もしない
+    if (
+      !document.fullscreenElement &&
+      detectPlatform(navigator.userAgent, navigator.platform, navigator.maxTouchPoints) === 'android'
+    ) {
+      try {
+        const p = document.documentElement.requestFullscreen?.() as Promise<void> | undefined;
+        p?.catch(() => undefined);
+      } catch {
+        /* 非対応環境では無視する */
+      }
+    }
   }
-  return { enter };
+
+  // リズムゲームから出るとき（CD 側の画面へ戻るとき）の後片付け
+  function exit(): void {
+    disarmHistoryGuard();
+    if (document.fullscreenElement) {
+      try {
+        const p = document.exitFullscreen() as Promise<void> | undefined;
+        p?.catch(() => undefined);
+      } catch {
+        /* 解除できない環境では無視する */
+      }
+    }
+  }
+  return { enter, exit };
 }
-let gameMode: { enter: () => void } | null = null;
+let gameMode: { enter: () => void; exit: () => void } | null = null;
 
 /** リズムゲームへ入る（初回は初期化し、毎回メニュー画面から始める） */
 export function enterGameMode(): void {
   gameMode ??= initGameMode();
   gameMode.enter();
+}
+
+/** リズムゲームから出る（履歴ガードの掃除とフルスクリーンの解除） */
+export function exitGameMode(): void {
+  gameMode?.exit();
 }

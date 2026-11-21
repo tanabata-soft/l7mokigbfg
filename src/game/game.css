@@ -72,11 +72,41 @@
 #view-game .game-main {
   position: relative;
   z-index: 1;
+  /* CD 側の .view は flex column。margin の auto があると flex の stretch が効かず、
+     幅が max-width の 480px に張り付いて、480px 未満の画面で横にはみ出していた
+     （実機で判明、v1.2.2 で修正）。width: 100% で画面幅に合わせ、広い画面では
+     max-width で抑えて auto マージで中央に置く */
+  width: 100%;
   max-width: 480px;
   margin: 0 auto;
   /* iPhone のノッチ・ホームバーを避ける */
   padding: max(16px, var(--safe-top)) max(16px, env(safe-area-inset-right))
     max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  /* 一画面に収めるため、高さは .view（100dvh）いっぱいにして縦の flex にする。
+     中身の調整は #menu-screen 側（カルーセルだけが縮む） */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* メニュー画面は縦の flex。画面の高さが足りないときはカルーセルだけが縮み、
+   ほかの部品（題字・ベストスコア・難易度・スタート・フッター）は元の大きさで
+   一画面に収まる（v1.2.2。#view-game の overflow-y: auto は保険として残る） */
+#view-game #menu-screen {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#view-game #menu-screen > * {
+  flex: 0 0 auto;
+}
+
+#view-game #menu-screen > .carousel {
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 /* ブランド表示（ポスターの題字）。左寄せの細字＋グラデーションの短い罫（オーナー承認の見た目 2026-11-20） */#view-game .brand {
@@ -171,6 +201,9 @@
    隣のジャケットが両端に少し見える幅（74%）にする */#view-game .carousel {
   position: relative;
   margin-top: 6px;
+  /* 縦の flex: 高さが足りないときはビューポート側が縮む（一画面に収める v1.2.2） */
+  display: flex;
+  flex-direction: column;
 }
 
 #view-game .carousel-viewport {
@@ -178,6 +211,8 @@
   scroll-snap-type: x mandatory;
   scrollbar-width: none;
   padding: 10px 0 14px;
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 #view-game .carousel-viewport::-webkit-scrollbar {
@@ -187,6 +222,8 @@
 #view-game .carousel-track {
   display: flex;
   gap: 14px;
+  /* ビューポートが縮んだときはトラックも一緒に縮み、スライドがその高さに付く */
+  height: 100%;
 }
 
 /* 先頭と末尾のスライドも中央に来られるよう、両端にスペーサーを置く。
@@ -235,6 +272,9 @@
    下のように [data-song='<id>'] で上書きする */#view-game .carousel-slide img {
   display: block;
   width: 100%;
+  /* 高さが決まっているとき（画面が低くてカルーセルが縮んだとき）は枠いっぱいに
+     敷いて object-fit で切り取る。決まっていないときは aspect-ratio が効く */
+  height: 100%;
   aspect-ratio: 4 / 5;
   object-fit: cover;
   object-position: 50% 50%;
@@ -605,6 +645,34 @@
   touch-action: none;
 }
 
+/* 広い画面（PC など）では、プレイ画面をスマホ比率（390:844）のステージにして
+   中央に置く（オーナー決定 2026-11-21「案B：スマホ比率のまま拡大」）。
+   レーン幅もノーツの落下距離も、比率までスマホと一致させる。余白は単色
+   （#view-game の背景）で、ステージには薄い影を付けて区切る。
+   幅 480px 以下（スマホ縦持ち）では今まで通り全画面のまま */
+@media (min-width: 481px) {
+  #view-game #game-screen {
+    margin: auto;
+    width: min(100vw, calc(100dvh * 390 / 844));
+    height: min(100dvh, calc(100vw * 844 / 390));
+    box-shadow: 0 0 64px rgb(0 0 0 / 0.65);
+  }
+
+  /* ステージの外（余白）にメニューのぼかし背景を出さない。
+     game-main.ts が選曲のたびに style.opacity を直接書くので、!important で勝つ */
+  #view-game:has(#game-screen:not([hidden])) .menu-bg {
+    opacity: 0 !important;
+  }
+
+  /* 歌詞はジャケット（ステージ幅いっぱいの正方形）のすぐ下に出す。
+     ステージ幅は高さ × 390/844 なので、top はステージ高さに対する比率で表す
+     （46.2085% = 390/844）。基本ルール（.lyrics の top）より後ろで勝つよう、
+     セレクタは #game-screen 経由で強めてある */
+  #view-game #game-screen .lyrics {
+    top: calc(46.2085% + 10px);
+  }
+}
+
 #view-game #game-canvas {
   display: block;
   width: 100%;
@@ -774,6 +842,24 @@
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
+}
+
+/* 中断の確認カード（結果カードと同じ重ね方。オーナー指示 2026-11-21、案1） */
+#view-game .pause .pause-title {
+  font-size: 1.3rem;
+  font-weight: 700;
+  margin: 10px 0 4px;
+}
+
+#view-game .pause .pause-note {
+  color: var(--muted, #9aa3b2);
+  font-size: 0.9rem;
+  margin: 0 0 10px;
+}
+
+#view-game .pause .opt.danger {
+  color: #ff8f8f;
+  border-color: rgb(255 143 143 / 0.45);
 }
 
 /* 結果は別画面にせず、終わった演奏画面の上に重ねて出す（オーナー指示 2026-11-20）。

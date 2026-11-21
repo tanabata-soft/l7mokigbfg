@@ -32,6 +32,7 @@ import {
   type Judge,
   type JudgementCounts,
   type PlayNote,
+  type Rank,
 } from './logic';
 import type { SongEntry } from './charts';
 import { COMBO_PATTERNS, COMBO_SHOW_CONFIG, comboPatternDef } from './presentation';
@@ -47,15 +48,17 @@ export interface GameResult {
   counts: JudgementCounts;
   maxCombo: number;
   accuracy: number;
-  rank: string;
+  rank: Rank;
   /** オートプレイで演奏したか（true の回はベストスコアに残さない） */
   autoplay: boolean;
 }
 
 export interface GameCallbacks {
   onFinish(result: GameResult): void;
-  /** 中断（左上タップ、または画面が隠れた）でメニューに戻るとき */
+  /** 中断（確認カードで「メニューに戻る」を選んだ）でメニューに戻るとき */
   onAbort(): void;
+  /** 中断の確認カードの開閉（開く=true。閉じるは「つづける」を押したとき） */
+  onPause(open: boolean): void;
   /** コンボが30の倍数に達した（コンボ演出の登場）。appearance にパターン・ズーム・big が入る */
   onComboShow(combo: number, appearance: ComboAppearance): void;
   /** 歌詞の現在行が変わった（-1 は歌詞のない区間） */
@@ -64,6 +67,10 @@ export interface GameCallbacks {
 
 const HIT_Y_RATIO = 0.82;
 const READY_SECONDS = 2;
+/** 左上の中断ボタン（描画とタップ判定で共有する。オーナー指示 2026-11-21: × ではなく「❚❚ 中断」） */
+const PAUSE_BTN = { x: 10, y: 10, w: 100, h: 38 };
+/** 中断確認で「つづける」を押してから演奏が戻るまでの READY の時間（壁時計 ms） */
+const RESUME_COUNTDOWN_MS = 1000;
 const JUDGE_LABEL: Record<Judge, string> = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', miss: 'MISS' };
 const JUDGE_COLOR: Record<Judge, string> = { perfect: '#ffd166', great: '#4ecdc4', good: '#9aa8ff', miss: '#ff6b6b' };
 const GOLD = '#ffd166';
@@ -195,6 +202,19 @@ export class Game {
   private playing = false;
   private destroyed = false;
   /**
+   * 中断確認で凍結中か（オーナー指示 2026-11-21、案1）。凍結中は音を止めて位置を
+   * 覚えておき、再開時にその位置から鳴らし直す。phase は確認カード表示中が
+   * 'confirm'、「つづける」後の READY 中が 'countdown'
+   */
+  private paused = false;
+  private pausePhase: 'confirm' | 'countdown' = 'confirm';
+  /** 凍結した時点の曲位置（秒。READY 中は負） */
+  private pausePosSec = 0;
+  /** 'countdown' が終わる壁時計時刻（ms） */
+  private resumeDueWall = 0;
+  /** 再開の鳴らし直しに使う、読み込み済みの曲バッファ */
+  private songBuf: AudioBuffer | null = null;
+  /**
    * start() の世代番号。中断（abort）や再スタートのたびに進める。
    * start() は await をまたぐため、合間にバックグラウンドへ回って中断されても、
    * 古い start() が後から演奏を始めてしまわないようにする（v1.9.1）。
@@ -258,12 +278,12 @@ export class Game {
 
   private onPointerDown = (e: PointerEvent): void => {
     e.preventDefault();
-    if (!this.playing) return;
+    if (!this.playing || this.paused) return;
     const rect = this.canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    if (px < 56 && py < 56) {
-      this.abort();
+    if (px >= PAUSE_BTN.x && px <= PAUSE_BTN.x + PAUSE_BTN.w && py >= PAUSE_BTN.y && py <= PAUSE_BTN.y + PAUSE_BTN.h) {
+      this.pause();
       return;
     }
     // オートプレイ中はタップ入力を受け付けない（左上の中断だけ従来どおり効く）
@@ -310,7 +330,11 @@ export class Game {
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {
-    if (!this.playing || e.repeat || this.autoplay) return;
+    if (e.key === 'Escape' && this.playing && !this.paused) {
+      this.pause();
+      return;
+    }
+    if (!this.playing || this.paused || e.repeat || this.autoplay) return;
     const lane = 'dfjk'.indexOf(e.key.toLowerCase());
     if (lane < 0) return;
     this.keyLanes.add(lane);
@@ -326,11 +350,13 @@ export class Game {
 
   private onVisibility = (): void => {
     if (document.visibilityState === 'hidden') {
-      // プレイ中に画面が隠れたら、その場で演奏を止めてメニューへ（裏で進んで大量MISSにしない）。
-      // あわせて押下状態をリセットする: 裏にいる間に pointerup / keyup を取りこぼすと、
-      // 押されたままの状態が残り、復帰後にタッチが効かないように見える（v1.9.1 の不具合対応）
-      this.resetInput();
-      this.abort();
+      // プレイ中に画面が隠れたら、演奏を凍結して中断確認を出しておく（オーナー指示
+      // 2026-11-21、案1。旧仕様はその場で中断してメニューへ戻していた）。戻ってきたら
+      // カードが開いたままなので、「つづける」で止めた位置から再開できる。
+      // pause() の中で押下状態もリセットする: 裏にいる間に pointerup / keyup を
+      // 取りこぼすと、押されたままの状態が残り復帰後にタッチが効かないように
+      // 見える（v1.9.1 の不具合対応）
+      this.pause();
     } else {
       // 前面に戻ったら、止まっている AudioContext を起こす。ゲームの時計は
       // AudioContext 基準なので、止まったままだと READY 表示のまま凍って見える
@@ -339,9 +365,8 @@ export class Game {
   };
 
   private onPageHide = (): void => {
-    // 画面ロックなど、visibilitychange が届かない経路でも演奏を止める
-    this.resetInput();
-    this.abort();
+    // 画面ロックなど、visibilitychange が届かない経路でも演奏を凍結する
+    this.pause();
   };
 
   private onBlur = (): void => {
@@ -430,6 +455,7 @@ export class Game {
   /** テスト用の入口向け: 曲の現在位置（ms。READY 中は負、演奏中でなければ -1） */
   songPositionMs(): number {
     if (!this.playing) return -1;
+    if (this.paused) return this.pausePosSec * 1000;
     return (nowSeconds() - this.startAt) * 1000;
   }
 
@@ -438,8 +464,19 @@ export class Game {
     // スタート操作のジェスチャの中で呼ばれる前提で、まず音声を unlock する
     unlockAudio();
     const session = ++this.startSession;
+    // 前の演奏の最終フレーム（前の曲のジャケット背景）が、音の読み込み中に
+    // そのまま見えてしまうのを防ぐ。ゲーム画面への切替と同じ同期処理の中で
+    // 両キャンバスを地の色へ戻し、背景の参照も外しておく（オーナー指摘
+    // 2026-11-21: リズムゲーム開始直後に前の曲の背景が一瞬残る）
+    this.bg = null;
+    this.clearCanvases();
+    // 歌詞表示（DOM）も前の曲のものが残るため、読み込み前に「歌詞なし」を通知して
+    // 消しておく（オーナー指摘 2026-11-21: 背景は消えたが歌詞が残っていた）
+    this.cb.onLyric(-1);
     const buf = await loadBuffer(entry.audioUrl);
     if (this.destroyed || session !== this.startSession) return;
+    this.songBuf = buf;
+    this.paused = false;
     this.entry = entry;
     this.difficulty = difficulty;
     this.autoplay = autoplay;
@@ -542,6 +579,22 @@ export class Game {
     }
   }
 
+  /** 両キャンバスを地の色に戻す（start の冒頭で、前の演奏の残像を消すため）。
+   * 変換行列を外して実ピクセル全面を塗る: CSS 単位で塗ると、端数で右端・下端の
+   * 1ピクセルに前のフレームが残ることがあるため */
+  private clearCanvases(): void {
+    const { g, gn } = this;
+    g.save();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = '#0e1018';
+    g.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    g.restore();
+    gn.save();
+    gn.setTransform(1, 0, 0, 1, 0, 0);
+    gn.clearRect(0, 0, this.notesCanvas.width, this.notesCanvas.height);
+    gn.restore();
+  }
+
   /** 演奏を止めてメニューに戻る（結果は残さない） */
   abort(): void {
     // 進行中の start() があれば取り消す（await の合間に中断されても、
@@ -549,6 +602,7 @@ export class Game {
     this.startSession++;
     if (!this.playing) return;
     this.playing = false;
+    this.paused = false;
     cancelAnimationFrame(this.raf);
     stopCurrent();
     stopAllHoldSounds();
@@ -558,9 +612,60 @@ export class Game {
     this.cb.onAbort();
   }
 
+  /**
+   * 演奏を凍結して中断の確認カードを出す（オーナー指示 2026-11-21、案1）。
+   * 音はその場で止め、曲位置を覚えておく。再開は resume() → READY をはさんで
+   * finishResume() が止めた位置から鳴らし直す（READY 中の初期化し直しと同じ流儀）。
+   * 中断ボタン・端スワイプの「戻る」・アプリ切替のどれからも、ここへ統一する
+   */
+  pause(): void {
+    if (!this.playing || this.paused) return;
+    this.pausePosSec = nowSeconds() - this.startAt;
+    this.resetInput();
+    stopCurrent();
+    stopAllHoldSounds();
+    this.paused = true;
+    this.pausePhase = 'confirm';
+    setData('game', 'paused');
+    this.cb.onPause(true);
+  }
+
+  /** 確認カードの「つづける」。カードを閉じ、READY（1秒）をはさんで再開する */
+  resume(): void {
+    if (!this.playing || !this.paused || this.pausePhase !== 'confirm') return;
+    this.pausePhase = 'countdown';
+    this.resumeDueWall = performance.now() + RESUME_COUNTDOWN_MS;
+    this.cb.onPause(false);
+  }
+
+  /** READY が明けたら、凍結した位置から曲を鳴らし直して時計を引き継ぐ */
+  private finishResume(): void {
+    const buf = this.songBuf;
+    if (!buf || !this.entry) {
+      this.abort();
+      return;
+    }
+    const now = nowSeconds();
+    const pos = this.pausePosSec;
+    this.startAt = now - pos;
+    playBuffer(buf, Math.max(now, this.startAt), Math.max(0, pos));
+    this.lastFrameAt = now;
+    this.clockSeenAt = now;
+    this.clockAdvanceWall = performance.now();
+    this.audioFrozen = false;
+    setData('audioFrozen', 'off');
+    this.paused = false;
+    setData('game', 'playing');
+  }
+
+  /** 中断確認で凍結中か */
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
   /** デバッグ用: いまの成績で結果画面へ進む */
   finishNow(): void {
-    if (this.playing) this.finish();
+    if (this.playing && !this.paused) this.finish();
   }
 
   /** レーンが今も押されているか（ポインタ・キーのどちらか） */
@@ -844,6 +949,11 @@ export class Game {
     const W = this.width;
     const H = this.height;
     const frameAt = nowSeconds();
+    // 中断確認の「つづける」後の READY が明けたら、このフレームから再開する
+    if (this.paused && this.pausePhase === 'countdown' && performance.now() >= this.resumeDueWall) {
+      this.finishResume();
+    }
+    const isPaused = this.paused;
     // 前面にいるのに AudioContext が止まっている（iOS の割り込み＝着信等）と、
     // ゲームの時計が凍って READY や譜面が止まったままになる。1秒に1回だけ
     // resume を試みて復帰させる（間引きは時計自身が止まっているので壁時計で数える）
@@ -883,10 +993,11 @@ export class Game {
       // READY 中の凍結は、開始そのものを初期化し直す（曲はまだ始まっていない）
       void this.reinitStart();
     }
-    // 経過時間（秒）。タブ復帰などで大きく飛んだときは 50ms に丸める
-    const dt = Math.min(0.05, Math.max(0, frameAt - this.lastFrameAt));
+    // 経過時間（秒）。タブ復帰などで大きく飛んだときは 50ms に丸める。
+    // 凍結中は時刻を止めた位置に固定し、演出の経過時間も進めない
+    const dt = isPaused ? 0 : Math.min(0.05, Math.max(0, frameAt - this.lastFrameAt));
     this.lastFrameAt = frameAt;
-    const nowSec = frameAt - this.startAt;
+    const nowSec = isPaused ? this.pausePosSec : frameAt - this.startAt;
     const nowMs = nowSec * 1000;
     // このフレームのコンボ段階。上がった瞬間は tierFlash を立てて縁の光を強める
     const tier = comboTier(this.combo);
@@ -897,16 +1008,16 @@ export class Game {
 
     // 歌詞の現在行が変わったら通知する（表示は main.ts 側の DOM）
     const li = lyricIndexAt(this.entry?.lyrics ?? [], nowMs);
-    if (li !== this.lyricIndex) {
+    if (!isPaused && li !== this.lyricIndex) {
       this.lyricIndex = li;
       setData('lyricIndex', li);
       this.cb.onLyric(li);
     }
 
     // オートプレイ中は、ミス掃除より先に時刻の来たノーツを PERFECT で処理する
-    if (this.autoplay) this.autoPlay(nowMs);
+    if (this.autoplay && !isPaused) this.autoPlay(nowMs);
 
-    const missed = sweepMisses(this.notes, nowMs);
+    const missed = isPaused ? 0 : sweepMisses(this.notes, nowMs);
     if (missed > 0) {
       this.counts.miss += missed;
       this.combo = 0; // コンボが切れたら tier も 0 に戻り、演出は素に戻る
@@ -917,6 +1028,7 @@ export class Game {
     // 長押しの進行: tick スコア（拍ごと。音はヒット音の連打が担当し、tick 自体は鳴らさない）、
     // 押し切ったら頭の判定で集計＋ボーナス＋完走音、失敗はミス＋失敗音
     for (const n of this.notes) {
+      if (isPaused) break;
       if (n.holdPhase !== 'holding' && n.holdPhase !== 'grace') continue;
       const ev = advanceHold(n, nowMs);
       if (ev.ticks > 0) {
@@ -1175,6 +1287,12 @@ export class Game {
       g.font = 'bold 48px sans-serif';
       g.fillText('READY', W / 2, H * 0.4);
     }
+    if (isPaused && this.pausePhase === 'countdown') {
+      // 再開前の READY（確認カードが閉じた後、演奏が戻るまでの1秒）
+      g.fillStyle = '#fff';
+      g.font = 'bold 48px sans-serif';
+      g.fillText('READY', W / 2, H * 0.4);
+    }
     if (this.audioFrozen) {
       // 音声が止まって時計が凍っている間の案内。タップで復帰できることを伝える
       g.fillStyle = '#fff';
@@ -1222,9 +1340,17 @@ export class Game {
       g.globalAlpha = 1;
     }
     g.textAlign = 'left';
+    // 中断ボタン: × ではなく「❚❚ 中断」と分かる見た目にする（オーナー指示 2026-11-21）
+    g.fillStyle = 'rgba(6,8,16,.45)';
+    g.beginPath();
+    g.roundRect(PAUSE_BTN.x, PAUSE_BTN.y, PAUSE_BTN.w, PAUSE_BTN.h, 19);
+    g.fill();
     g.fillStyle = '#fff';
+    g.fillRect(PAUSE_BTN.x + 15, PAUSE_BTN.y + 10, 5, 18);
+    g.fillRect(PAUSE_BTN.x + 24, PAUSE_BTN.y + 10, 5, 18);
+    g.font = 'bold 15px sans-serif';
+    g.fillText('中断', PAUSE_BTN.x + 40, PAUSE_BTN.y + 25);
     g.font = 'bold 21px sans-serif';
-    g.fillText('✕', 20, 36);
     g.textAlign = 'right';
     g.fillText(String(this.score).padStart(7, '0'), W - 14, 36);
     g.fillStyle = 'rgba(255,255,255,.2)';

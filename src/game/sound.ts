@@ -23,7 +23,7 @@
 // 小さな合成音として据え置く（ヒット音と聞き分けられるようにするため）。
 import { audioContext, audioGeneration, audioOutput, loadBuffer } from './audio';
 import { load, save } from './storage';
-import { hitPitchMultiplier, type Judge } from './logic';
+import { hitPitchMultiplier, type Judge, type Rank } from './logic';
 import hitSampleUrl from './assets/hit-sample.wav';
 
 export type HitJudge = Exclude<Judge, 'miss'>;
@@ -490,6 +490,90 @@ export async function playFullComboVoice(url?: string): Promise<void> {
     document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'fullcombo' } }));
   } catch {
     // 音が出せなくても続行する
+  }
+}
+
+/**
+ * 結果発表ジングル（オーナー指示 2026-11-21、音源は A 案＝アプリ内合成を採用）。
+ * 演奏が終わったら、まずこのファンファーレが鳴り、鳴り終わってから結果カードが
+ * 出る（出す側の game-main.ts が、返ってきた長さだけ表示を遅らせる）。
+ * C メジャーの上行4音（ド・ミ・ソ・ド）→ 終止和音という小さなファンファーレで、
+ * S ランクのときだけ和音の前にきらめき（高音2音）を足して少し豪華にする。
+ * 効果音のオン/オフ設定に従う: オフのときは鳴らさず、長さ 0 を返す（結果は即表示）。
+ */
+export interface JingleNote {
+  /** ジングル開始からのオフセット（秒） */
+  atSec: number;
+  /** 周波数 (Hz) */
+  freq: number;
+  /** 音の長さ（秒）。この時間で指数減衰して消える */
+  durSec: number;
+  /** 音量 */
+  peak: number;
+}
+
+/** 結果発表ジングルの譜面を返す。S ランクは和音の前にきらめきが入り、少し長い */
+export function resultJingleNotes(rank: Rank): JingleNote[] {
+  const up: JingleNote[] = [
+    { atSec: 0, freq: 523.25, durSec: 0.13, peak: 0.18 },
+    { atSec: 0.12, freq: 659.25, durSec: 0.13, peak: 0.18 },
+    { atSec: 0.24, freq: 783.99, durSec: 0.13, peak: 0.18 },
+    { atSec: 0.36, freq: 1046.5, durSec: 0.18, peak: 0.2 },
+  ];
+  const sparkle: JingleNote[] =
+    rank === 'S'
+      ? [
+          { atSec: 0.56, freq: 1318.51, durSec: 0.1, peak: 0.13 },
+          { atSec: 0.66, freq: 1567.98, durSec: 0.1, peak: 0.13 },
+        ]
+      : [];
+  const chordAt = rank === 'S' ? 0.78 : 0.56;
+  const chord: JingleNote[] = [523.25, 659.25, 783.99, 1046.5].map((freq) => ({
+    atSec: chordAt,
+    freq,
+    durSec: 0.62,
+    peak: 0.085,
+  }));
+  return [...up, ...sparkle, ...chord];
+}
+
+/** ジングルの長さ（ms）。最後の音が消える時刻＋結果表示までの小さな間 */
+export function resultJingleDurationMs(rank: Rank): number {
+  const endSec = Math.max(...resultJingleNotes(rank).map((n) => n.atSec + n.durSec));
+  return Math.round(endSec * 1000) + 80;
+}
+
+/** ジングルの1音を鳴らす（三角波で、金管っぽく柔らかく） */
+function playJingleNote(note: JingleNote, startAt: number, out: AudioNode): void {
+  const ac = audioContext();
+  const t = startAt + note.atSec;
+  const osc = ac.createOscillator();
+  osc.type = 'triangle';
+  osc.frequency.value = note.freq;
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(note.peak, t + 0.012);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + note.durSec);
+  osc.connect(gain).connect(out);
+  osc.start(t);
+  osc.stop(t + note.durSec + 0.02);
+}
+
+/**
+ * 結果発表ジングルを鳴らし、その長さ（ms）を返す。効果音オフ・再生失敗のときは
+ * 鳴らさず 0 を返す（呼び出し側は 0 なら結果を即表示する）。
+ */
+export function playResultJingle(rank: Rank): number {
+  if (!enabled) return 0;
+  try {
+    const ac = audioContext();
+    void ac.resume();
+    const startAt = ac.currentTime + 0.02;
+    for (const note of resultJingleNotes(rank)) playJingleNote(note, startAt, hitBus());
+    document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'jingle', rank } }));
+    return resultJingleDurationMs(rank);
+  } catch {
+    return 0;
   }
 }
 
