@@ -14,7 +14,7 @@ import {
   type NoteData,
   type SongData,
 } from '../src/game/logic';
-import { flickToneFor } from '../src/game/sound';
+import { flickSampleToneFor } from '../src/game/sound';
 
 // リズムゲームのデータ（譜面 charts.json / 歌詞 lyrics.json）の整合を担保する。
 // 譜面は scripts/generate-charts.py の生成物、歌詞は CD 側の検証済み歌詞同期
@@ -183,12 +183,13 @@ describe('フリックノーツの読み込みと判定', () => {
     for (const entry of SONGS) expect(validateCharts(entry.data), entry.id).toEqual([]);
   });
 
-  it('フリック成功音（合成）のパラメータ: PERFECT が最も広く長く、tier でピッチが上がる', () => {
-    const perfect = flickToneFor('perfect', 0);
-    const good = flickToneFor('good', 0);
-    expect(perfect.sweepToHz).toBeGreaterThan(good.sweepToHz);
-    expect(perfect.sweepSec).toBeGreaterThan(good.sweepSec);
-    expect(flickToneFor('perfect', 2).ringHz).toBeGreaterThan(perfect.ringHz);
+  it('フリック成功音（H2 サンプル）のパラメータ: PERFECT が原音（レート1）で最も大きく、tier でピッチが上がる', () => {
+    const perfect = flickSampleToneFor('perfect', 0);
+    const good = flickSampleToneFor('good', 0);
+    expect(perfect.rate).toBe(1);
+    expect(perfect.rate).toBeGreaterThan(good.rate);
+    expect(perfect.peak).toBeGreaterThan(good.peak);
+    expect(flickSampleToneFor('perfect', 2).rate).toBeGreaterThan(perfect.rate);
   });
 });
 

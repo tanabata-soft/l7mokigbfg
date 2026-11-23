@@ -33,7 +33,7 @@ import {
   type DebugAction,
 } from '../debug';
 import { detectPlatform } from '../install';
-import { isSoundOn, playGameOverSound, playResultJingle, playResultVoices, playSwipeSound, playUiClick, preloadHitSample, preloadResultVoices, setSound, type ResultVoice } from './sound';
+import { isSoundOn, playGameOverSound, playResultJingle, playResultVoices, playSwipeSound, playUiClick, preloadFlickSample, preloadGameOverSound, preloadHitSample, preloadResultJingle, preloadResultVoices, setSound, type ResultVoice } from './sound';
 import { isVibrateOn, setVibrate } from './haptics';
 import { audioContext, audioState, isUnlocked, unlockAudio } from './audio';
 import { load, migrateStorage, requestPersist, save } from './storage';
@@ -567,7 +567,7 @@ function initGameMode(): { enter: () => void; exit: () => void } {
   const game = new Game($<HTMLCanvasElement>('game-canvas'), $<HTMLCanvasElement>('notes-canvas'), {
     onFinish: (result) => {
       // ゲームオーバー（ライフが尽きた失敗）のときは、ジングルの代わりに
-      // ゲームオーバー音（アプリ内合成）を鳴らし始めてから、
+      // ゲームオーバー音（オーナー提供の音源ファイル）を鳴らし始めてから、
       // 少し待って失敗の結果カードを出す。効果音オフのときは待ちなしで即表示
       if (result.failed) {
         const waitMs = playGameOverSound();
@@ -578,8 +578,9 @@ function initGameMode(): { enter: () => void; exit: () => void } {
         }
         return;
       }
-      // 結果発表ジングル（アプリ内合成）を鳴らし始めてから、少し待って
-      // 結果カードを出す。効果音オフのときはジングルなし（待ちなし）で
+      // 結果発表ジングル（オーナー提供の音源ファイル。2026-11-22 にアプリ内合成
+      // から差し替え）を鳴らし始めてから、少し待って結果カードを出す。表示までの
+      // 待ち時間は差し替え前と同じ。効果音オフのときはジングルなし（待ちなし）で
       // 即表示する。（2026-11-20 の「締めの演出は挟まず結果へ直行」はこの指示で置換。
       // フルコンボの印は従来どおり結果カードの中に出す）
       const waitMs = playResultJingle(result.rank);
@@ -654,6 +655,12 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     unlockAudio();
     // ヒット音のサンプル素材も先読みしておく（最初のヒットで読み込み待ちにならないように）
     preloadHitSample();
+    // フリック音のサンプル素材も先読みしておく（最初のフリックで読み込み待ちにならないように）
+    preloadFlickSample();
+    // 結果発表ジングルの素材も先読みしておく（演奏終了の瞬間に鳴らし始めるため）
+    preloadResultJingle();
+    // ゲームオーバー音の素材も先読みしておく（確定の瞬間に鳴らし始めるため）
+    preloadGameOverSound();
     // 結果ボイスの素材も先読みしておく（結果表示の瞬間に鳴らし始めるため）
     preloadResultVoices();
     const entry = songById(selectedSong);
