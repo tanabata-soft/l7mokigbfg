@@ -86,6 +86,35 @@ v6-1 の変更点:
   flick_budget（任意の曲別メタ。未設定なら上限なし）を上限とし、超過分は優先度の低いものから
   rank を上げて収める。移動・削除はレポートの flickFlowLog に理由付きで残る。
 
+v6-4 の変更点（ボーカル被覆。根拠は docs/CHART-DESIGN.md の「譜面 v6-4」節）:
+- 歌詞アクティブ区間（歌詞行の時間帯）全体で、ノーツの空白が難易度別の上限
+  （easy 2.5秒／normal 2.0秒／hard 1.5秒、定数 VOCAL_COVER_GAP_S）を超えない
+  よう保証する。従来の fill_fever_gaps は FEVER 区間限定・閾値2.9秒だったため、
+  サビ外の空白（実測では空白の67%）と、間引き以外で生じた空白を拾えなかった。
+- 歌詞タイミングの入力: 曲別メタデータ lyrics（区間の列／ファイルパス）または
+  lyrics_file、無ければ既定で src/game/data/lyrics.json（gen-game-lyrics.mjs が
+  CD 側 sync.ts から作る生成物）を曲 ID で引く。CLI の --lyrics <path> でも
+  差し替えられる。歌詞入力が無い曲は従来動作（FEVER 区間の fill_fever_gaps
+  のみ）にフォールバックする。
+- 補填の優先順: (1) 間引き・修復で落ちた候補プールから戻す（候補は確定した
+  上位難易度の集合の中だけ＝入れ子 easy⊆normal⊆hard を維持）。
+  (2) プールが空の区間は、拍グリッド（sub==0）位置のうちボーカルレイヤー
+  強度（v5 曲は eff_by_layer["vocal"]、それ以外は全帯域 strength）が相対的に
+  高いスロットへノーツを合成する。合成位置は sub==0 に限るため、hard 用に
+  合成したノーツを normal／easy の補填候補にもそのまま使える。
+- フリックとの兼ね合い: 補填は v6-3 の整形・流れ検証の後に行い、フリック
+  アンカーの手前窓（easy 2.0拍／normal 1.5拍／hard 1.0拍）とフリック後
+  300ms の回復区間には入れない。フリック候補そのものも戻さないため、
+  フリックの位置・個数・flick_budget は変わらない。flick OFF の曲でも効く。
+- 総数キャップとの兼ね合い: 被覆補填はキャップ超過を許す（保証を優先）。
+  超過は生成レポートの vocalCoverage（capExceeded／countsBefore／countsAfter）
+  と標準出力のログで分かるようにする。
+- 補填ノーツはタップのみ（長押し・同時押しの相方は作らない）。補填のたびに
+  安全条件（同レーン最小間隔・レーン割合 18〜32%・同一レーン3連・両親指
+  C2／C3a／C3b の先回り回避）を見て、補填後は修復（repair_runs／
+  repair_side_runs）を回し直し、空白が再発したら戻し→修復を最大3回繰り返す。
+  最終検証は従来どおり validate() と check-two-thumb.py（違反0で書き出し）。
+
 v5 の変更点（根拠は docs/CHART-DESIGN.md の「譜面 v5」節、曲別方針は SONGS のメタデータ）:
 - V5-1 特徴量レイヤー: HPSS で打撃成分（ドラム）と持続成分を分け、持続成分の
   旋律帯域（600〜6000Hz）＝メロディ／声帯域（600〜3000Hz）×有声度＝ボーカル
@@ -183,6 +212,11 @@ HOP = 512
 #   chorus_bonus: サビの chorus_layer へのボーナス（既定 0.30）
 #   burst_basis: 16分パターンのゲートの根拠（main / drums / main65）
 #   chord_gate_drop: 同時押しの強さゲートだけを下げる曲別調整（強弱が均一な曲用。既定 0）
+#   lyrics: v6-4 の歌詞タイミング入力（任意）。区間の列 [[開始秒, 終了秒], ...]、
+#     歌詞ファイルへのパス（src/game/data/lyrics.json 形式＝曲 ID をキーに
+#     {startMs, endMs} の列）、またはその JSON をパースした dict を渡せる。
+#     lyrics_file でも同じ指定ができる。未指定なら既定で
+#     src/game/data/lyrics.json を曲 ID で引き、無ければ歌詞なし（従来動作）。
 #   sustain_hi / sustain_lo: v6-1a の sustain_mode 判定の閾値の曲別上書き
 #     （sustain_hi: 主レイヤー melody/vocal かつフレーズ持続度がこれ以上で
 #     「持続的」。既定 0.50。sustain_lo: 持続度がこれ以下で「打撃的」。既定 0.30）
@@ -225,6 +259,10 @@ HARD_CAP = 820  # hard の総ノーツ数の上限（安全弁。パターン＋
 NORMAL_CAP = 410  # normal の総ノーツ数の上限（8分の骨格を強さ順に間引く）
 EASY_CAP = 210  # easy の総ノーツ数の上限（拍位置のみを強さ順に間引く）
 FEVER_GAP_FILL_S = 2.9  # FEVER 区間でこの秒数を超える空白は、間引きで落ちた候補を戻して埋める
+VOCAL_COVER_GAP_S = {"easy": 2.5, "normal": 2.0, "hard": 1.5}  # v6-4: 歌詞アクティブ区間で許す空白の上限（秒、難易度別）
+VOCAL_COVER_FLICK_PRE_BEATS = {"easy": 2.0, "normal": 1.5, "hard": 1.0}  # v6-4: フリック手前窓（拍）。補填を入れない範囲（v6-3 と同じ値）
+VOCAL_COVER_FLICK_RECOVERY_MS = 300  # v6-4: フリック後の回復区間（ms）。補填を入れない範囲（v6-3 と同じ値）
+DEFAULT_LYRICS_FILE = "src/game/data/lyrics.json"  # v6-4: 歌詞タイミングの既定の入力先（gen-game-lyrics.mjs の生成物）
 DENSITY_FLOOR_RATIO = 0.92  # v6-1.1: 密度下限ガードの下限（候補プール比。thin 目標が最少レーン律速のときだけ発動）
 EIGHTH_BALANCE_W = 2.0  # v6-1.2: フィット時の8分位置だけのレーン分布均衡の重み（全体分布 6.0 の 1/3。normal プールの偏り対策。3.0 では track-b hard のレーン下限を割ったため 2.0）
 SNAP_WINDOW_MS = 38  # オンセットピークへ寄せる範囲（遠いピークは別のリズム事象なので寄せない）
@@ -1169,10 +1207,88 @@ def validate(name, charts, raw, duration_ms):
     return counts
 
 
+
+# ---- v6-4: 歌詞タイミング入力 ----
+
+
+def normalize_lyric_intervals(raw, song_id=None):
+    """歌詞タイミングの入力を [(開始秒, 終了秒), ...] に正規化する（決定的）。
+
+    受け付ける形:
+      - {曲ID: [...]} の dict（lyrics.json 形式）。song_id で引く
+      - [{"startMs": n, "endMs": n}, ...]（lyrics.json の行形式。ms）
+      - [{"start": 秒, "end": 秒}, ...]
+      - [[開始秒, 終了秒], ...]
+      - [[開始秒, "歌詞テキスト"], ...]（CD 側 sync.ts の行形式。
+        終了は次の行の開始、最終行は開始+4秒）
+    どれにも当てはまらない／空なら [] を返す（＝歌詞なしとして扱う）。
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        if song_id is not None and song_id in raw:
+            return normalize_lyric_intervals(raw[song_id], song_id)
+        if "startMs" in raw or "start" in raw:
+            raw = [raw]
+        else:
+            return []
+    out = []
+    items = list(raw)
+    for i, it in enumerate(items):
+        if isinstance(it, dict):
+            if "startMs" in it:
+                start = float(it["startMs"]) / 1000
+                end = float(it["endMs"]) / 1000 if "endMs" in it else start + 4.0
+            elif "start" in it:
+                start = float(it["start"])
+                end = float(it["end"]) if "end" in it else start + 4.0
+            else:
+                continue
+        elif isinstance(it, (list, tuple)) and len(it) >= 2:
+            start = float(it[0])
+            if isinstance(it[1], str):
+                # sync.ts 形式 [開始秒, テキスト]: 終了は次の行の開始（無ければ +4秒）
+                nxt = items[i + 1] if i + 1 < len(items) else None
+                end = float(nxt[0]) if nxt is not None else start + 4.0
+            else:
+                end = float(it[1])
+        else:
+            continue
+        if end > start:
+            out.append((start, end))
+    out.sort()
+    return out
+
+
+def load_lyrics_for_song(meta, song_id):
+    """曲の歌詞タイミングを解決する。優先順: メタデータ lyrics／lyrics_file
+    → 既定ファイル（src/game/data/lyrics.json）。無い曲は []（従来動作）。"""
+    src = meta.get("lyrics", meta.get("lyrics_file"))
+    if src is not None:
+        if isinstance(src, (str, Path)):
+            path = Path(src)
+            if not path.is_absolute():
+                path = ROOT / path
+            if path.exists():
+                return normalize_lyric_intervals(
+                    json.loads(path.read_text(encoding="utf-8")), song_id
+                )
+            return []
+        return normalize_lyric_intervals(src, song_id)
+    default = ROOT / DEFAULT_LYRICS_FILE
+    if default.exists():
+        try:
+            data = json.loads(default.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return normalize_lyric_intervals(data, song_id)
+    return []
+
+
 # ---- 曲ごとの生成 ----
 
 
-def process_song(song_id, meta, y, sr):
+def process_song(song_id, meta, y, sr, lyric_intervals=None):
     import bisect
 
     duration = float(librosa.get_duration(y=y, sr=sr))
@@ -1183,6 +1299,10 @@ def process_song(song_id, meta, y, sr):
     energies = bar_energies(y, sr, ext_beats)
     peaks = onset_peaks(onset_env, sr)
     fever = meta["fever"]
+    # v6-4: 歌詞タイミング（None ならメタデータ／既定ファイルから解決する。
+    # [] ＝歌詞入力なし＝従来動作にフォールバック）
+    if lyric_intervals is None:
+        lyric_intervals = load_lyrics_for_song(meta, song_id)
 
     # 演奏が実質終わる時刻（RMS が -25dB を切る最後の秒）
     rms = [float(np.sqrt(np.mean(y[i : i + sr] ** 2))) for i in range(0, len(y) - sr, sr)]
@@ -2212,6 +2332,261 @@ def process_song(song_id, meta, y, sr):
             ids.add(n["id"])
         return ids
 
+
+    # ---- v6-4: ボーカル被覆（fill_fever_gaps の一般化） ----
+    # 適用範囲を FEVER 区間から歌詞アクティブ区間全体へ広げ、上限を難易度別
+    # （VOCAL_COVER_GAP_S）にする。呼び出しはフリック整形・検証の後（後段）。
+    # ここでは関数と状態だけを用意する。
+    vocal_coverage_stats = {
+        d: {"fromPool": 0, "synthesized": 0, "unfilledGaps": 0} for d in ("easy", "normal", "hard")
+    }
+    synth_next_id = [max((n["id"] for n in notes), default=-1) + 1]
+
+    def n_sort_key(k):
+        return (k["time_ms"], k["lane"])
+
+    def vocal_score(slot):
+        """合成位置の根拠: ボーカルレイヤー強度（v5 曲は vocal の eff、
+        それ以外は全帯域 strength）。"""
+        if v5 and "eff_by_layer" in slot:
+            return float(slot["eff_by_layer"].get("vocal", slot["strength"]))
+        return float(slot["strength"])
+
+    def coverage_flick_times(diff):
+        rank_max = {"easy": 0, "normal": 1, "hard": 2}[diff]
+        return sorted(
+            notes_by_id[i]["time_ms"]
+            for i in id_sets[diff]
+            if notes_by_id[i].get("flick_rank") is not None
+            and notes_by_id[i]["flick_rank"] <= rank_max
+        )
+
+    def in_flick_exclusion(t, diff):
+        """フリック手前窓と直後300ms回復区間（補填を入れない範囲）。"""
+        pre_ms = VOCAL_COVER_FLICK_PRE_BEATS[diff] * period * 1000
+        for ft in coverage_flick_times(diff):
+            if ft - pre_ms <= t < ft:
+                return True
+            if ft < t <= ft + VOCAL_COVER_FLICK_RECOVERY_MS:
+                return True
+        return False
+
+    def coverage_cand_safe(n, kept_notes, min_gap, diff):
+        """補填候補の安全条件（fill_density_floor と同じ物差し＋フリック回避
+        ＋両親指 C2 の先回り）。補填ノーツはタップのみとする。"""
+        if n["hold_ms"] > 0 or n.get("flick_rank") is not None:
+            return False
+        t = n["time_ms"]
+        if in_flick_exclusion(t, diff):
+            return False
+        kept = [k["time_ms"] for k in kept_notes]
+        # 同レーン最小間隔（全体の最小間隔で見る。同刻は同時押しとして別扱い）
+        if any(t != k and abs(t - k) < min_gap for k in kept):
+            return False
+        same_time = [k for k in kept_notes if k["time_ms"] == t]
+        if same_time:
+            # 同時押しは2つまで・左右に分かれるペアだけ（C1）
+            if len(same_time) >= 2 or same_time[0]["lane"] // 2 == n["lane"] // 2:
+                return False
+        # C2: 長押しの帯の中は拘束側に置かない
+        for k in kept_notes:
+            if k["hold_ms"] > 0 and k["time_ms"] < t <= k["time_ms"] + k["hold_ms"] and k["lane"] // 2 == n["lane"] // 2:
+                return False
+        # レーン割合が検証範囲（0.18〜0.32）の外に出る候補は避ける
+        total = len(kept_notes)
+        lane_counts = [sum(1 for k in kept_notes if k["lane"] == l) for l in range(4)]
+        shares = [(lane_counts[l] + (1 if l == n["lane"] else 0)) / (total + 1) for l in range(4)]
+        if max(shares) > LANE_MAX_SHARE or min(shares) < LANE_MIN_SHARE:
+            return False
+        # 同一レーン3連の先回り回避（fill_fever_gaps と同じ見分け方）
+        seq = sorted(kept_notes, key=lambda k: (k["time_ms"], k["lane"]))
+        idx = bisect.bisect_left([(k["time_ms"], k["lane"]) for k in seq], (t, n["lane"]))
+        p1 = seq[idx - 1] if idx >= 1 else None
+        p2 = seq[idx - 2] if idx >= 2 else None
+        q1 = seq[idx] if idx < len(seq) else None
+        q2 = seq[idx + 1] if idx + 1 < len(seq) else None
+        L = n["lane"]
+        if (
+            (p1 is not None and p2 is not None and p1["lane"] == L == p2["lane"])
+            or (q1 is not None and q2 is not None and q1["lane"] == L == q2["lane"])
+            or (p1 is not None and q1 is not None and p1["lane"] == L == q1["lane"])
+        ):
+            return False
+        # C3a／C3b の先回り回避（fill_density_floor と同じ見方）
+        gseq = sorted(
+            [(k["beat"] * 4 + k["sub"], k["lane"]) for k in kept_notes]
+            + [(n["beat"] * 4 + n["sub"], L)]
+        )
+        gi = gseq.index((n["beat"] * 4 + n["sub"], L))
+        side = L // 2
+        run = 1
+        k = gi
+        while k - 1 >= 0 and gseq[k - 1][1] // 2 == side and gseq[k][0] - gseq[k - 1][0] <= 1:
+            run += 1
+            k -= 1
+        k = gi
+        while k + 1 < len(gseq) and gseq[k + 1][1] // 2 == side and gseq[k + 1][0] - gseq[k][0] <= 1:
+            run += 1
+            k += 1
+        if run >= 3:
+            return False
+        for s0 in range(max(0, gi - 4), gi + 1):
+            lanes_seen = set()
+            prev_g = None
+            prev_lane = None
+            length = 0
+            for g2, l2 in gseq[s0 : gi + 5]:
+                if l2 // 2 != side:
+                    break
+                if prev_g is not None and g2 - prev_g > 2:
+                    break
+                if prev_lane is not None and l2 == prev_lane:
+                    break
+                if l2 not in lanes_seen and len(lanes_seen) >= 2:
+                    break
+                lanes_seen.add(l2)
+                prev_g = g2
+                prev_lane = l2
+                length += 1
+            if length >= 5 and len(lanes_seen) == 2:
+                return False
+        return True
+
+    def lyric_spans_ms():
+        """歌詞アクティブ区間（ms、クリップ済み・隣接行は連結）。
+
+        lyrics.json の行は endMs＝次の行の startMs で連なっているため、
+        隣接する行を連結しないと、行をまたぐ空白を過小に測ってしまう。
+        行間に実際に無音がある区間（end < 次の start）は連結しない。"""
+        spans = []
+        for lo_s, hi_s in lyric_intervals:
+            lo = max(int(lo_s * 1000), START_MS)
+            hi = min(int(hi_s * 1000), duration_ms - int(END_MARGIN_S * 1000))
+            if hi <= lo:
+                continue
+            if spans and lo <= spans[-1][1] + 1:
+                spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+            else:
+                spans.append((lo, hi))
+        return spans
+
+    def coverage_max_gap_ms(diff):
+        """歌詞アクティブ区間内の最大空白（ms）。歌詞が無ければ 0。"""
+        if not lyric_intervals:
+            return 0
+        kept = sorted(notes_by_id[i]["time_ms"] for i in id_sets[diff])
+        worst = 0
+        for lo, hi in lyric_spans_ms():
+            pts = [lo] + [t for t in kept if lo <= t < hi] + [hi]
+            for a, b in zip(pts, pts[1:]):
+                worst = max(worst, b - a)
+        return worst
+
+    def fill_vocal_coverage(diff, ids, pool_ids, min_gap, upper=()):
+        """歌詞アクティブ区間の空白を上限以下まで埋める（v6-4）。
+
+        優先順: (1) 落ちた候補プール（pool_ids。呼び出し側で上位難易度の
+        確定集合に限る＝入れ子維持）から戻す。(2) プールが空なら拍グリッド
+        （sub==0）でボーカル強度が相対的に高いスロットへ合成する。
+        キャップは見ない（被覆保証を優先し、超過はレポートで明示する）。
+        upper は [(難易度名, その確定集合, 最小間隔), ...]（上位難易度）。
+        合成ノーツは上位難易度にも安全な場合に限り作り、上位の集合にも
+        同時に加える（合成ノーツが下位だけに存在すると入れ子が崩れるため。
+        上位で先に作られた合成ノーツは pool 経由で下位の候補にもなる）。
+        """
+        ids = set(ids)
+        cap_ms = VOCAL_COVER_GAP_S[diff] * 1000
+        pool = [notes_by_id[i] for i in pool_ids if i not in ids]
+        for lo, hi in lyric_spans_ms():
+            for _ in range(60):
+                kept_notes = sorted((notes_by_id[i] for i in ids), key=lambda n: n["time_ms"])
+                kept = [n["time_ms"] for n in kept_notes]
+                inside = [t for t in kept if lo <= t < hi]
+                pts = [lo] + inside + [hi]
+                worst = None
+                for a, b in zip(pts, pts[1:]):
+                    if worst is None or b - a > worst[1] - worst[0]:
+                        worst = (a, b)
+                if worst is None or worst[1] - worst[0] <= cap_ms:
+                    break
+                a, b = worst
+                mid = (a + b) / 2
+                cands = [
+                    n
+                    for n in pool
+                    if a < n["time_ms"] < b and coverage_cand_safe(n, kept_notes, min_gap, diff)
+                ]
+                if cands:
+                    cands.sort(key=lambda n: (0 if n["sub"] == 0 else 1, abs(n["time_ms"] - mid), -n["strength"]))
+                    chosen = cands[0]
+                    ids.add(chosen["id"])
+                    pool.remove(chosen)
+                    vocal_coverage_stats[diff]["fromPool"] += 1
+                    continue
+                # プールが空: 拍グリッド位置へ合成する。位置は sub==0 に限る
+                # ため、合成ノーツは全難易度の補填候補になり得る（入れ子維持は
+                # 呼び出し側のプール制限で担保する）
+                kept_times = set(kept)
+                slots = [
+                    sl
+                    for sl in playable
+                    if sl["sub"] == 0
+                    and a < int(round(sl["time"] * 1000)) < b
+                    and int(round(sl["time"] * 1000)) not in kept_times
+                ]
+                slots.sort(key=lambda sl: (-vocal_score(sl), sl["time"]))
+                placed = False
+                lane_counts = [sum(1 for k in kept_notes if k["lane"] == l) for l in range(4)]
+                for sl in slots:
+                    t = int(round(sl["time"] * 1000))
+                    for lane in sorted(range(4), key=lambda l: (lane_counts[l], l)):
+                        cand = {
+                            "id": synth_next_id[0],
+                            "time_ms": t,
+                            "lane": lane,
+                            "hold_ms": 0,
+                            "tail_ms": 0,
+                            "kind": "synth",
+                            "pattern": None,
+                            "unit_rel": 0,
+                            "sub": sl["sub"],
+                            "beat": sl["beat"],
+                            "bar": sl["beat"] // 4,
+                            "strength": float(sl["strength"]),
+                            "sustain": sl.get("sustain", 0.0),
+                            "f0": sl.get("f0", float("nan")),
+                            "pitch_lane": sl["pitch_lane"],
+                            "fever": sl["fever"],
+                            "energy": sl["energy"],
+                        }
+                        if coverage_cand_safe(cand, kept_notes, min_gap, diff) and all(
+                            coverage_cand_safe(
+                                cand,
+                                sorted(
+                                    (notes_by_id[i] for i in uset),
+                                    key=lambda k: n_sort_key(k),
+                                ),
+                                ugap,
+                                udiff,
+                            )
+                            for udiff, uset, ugap in upper
+                        ):
+                            notes_by_id[cand["id"]] = cand
+                            notes.append(cand)
+                            synth_next_id[0] += 1
+                            ids.add(cand["id"])
+                            for _udiff, uset, _ugap in upper:
+                                uset.add(cand["id"])
+                            vocal_coverage_stats[diff]["synthesized"] += 1
+                            placed = True
+                            break
+                    if placed:
+                        break
+                if not placed:
+                    vocal_coverage_stats[diff]["unfilledGaps"] += 1
+                    break
+        return ids
+
     # v6-3: フリックのアンカーは難易度導出でピン留めし、修復でも優先的に残す
     flick_pin = {"normal": set(), "easy": set()}
     flick_protected = set()
@@ -2628,6 +3003,79 @@ def process_song(song_id, meta, y, sr):
             key=lambda r: (r["time"], r["lane"]),
         )
 
+
+    # ---- v6-4: ボーカル被覆の適用（フリック整形・流れ検証・budget の後） ----
+    # フリックの位置・個数を変えないため、フリック処理が全て終わってから行う。
+    # 補填→修復を繰り返し、修復で空白が再発しても上限以下に収める。
+    # 歌詞入力が無い曲では従来動作（上の fill_fever_gaps まで）で終わる。
+    vocal_coverage_report = {"lyrics": bool(lyric_intervals), "diffs": {}}
+    if lyric_intervals:
+        caps_by_diff = {"easy": EASY_CAP, "normal": NORMAL_CAP, "hard": HARD_CAP}
+        min_gap_by_diff = {"easy": 260, "normal": 150, "hard": 150}
+        counts_before = {d: len(id_sets[d]) for d in ("easy", "normal", "hard")}
+        for _ in range(3):
+            id_sets["hard"] = fill_vocal_coverage(
+                "hard", id_sets["hard"], set(notes_by_id), min_gap_by_diff["hard"]
+            )
+            id_sets["normal"] = fill_vocal_coverage(
+                "normal",
+                id_sets["normal"],
+                set(id_sets["hard"]),
+                min_gap_by_diff["normal"],
+                upper=(("hard", id_sets["hard"], min_gap_by_diff["hard"]),),
+            )
+            id_sets["easy"] = fill_vocal_coverage(
+                "easy",
+                id_sets["easy"],
+                {
+                    i
+                    for i in id_sets["normal"]
+                    if notes_by_id[i]["sub"] in (0, 2) and notes_by_id[i]["kind"] != "chord"
+                },
+                min_gap_by_diff["easy"],
+                upper=(
+                    ("normal", id_sets["normal"], min_gap_by_diff["normal"]),
+                    ("hard", id_sets["hard"], min_gap_by_diff["hard"]),
+                ),
+            )
+            # 補填で生じた同一レーン連・両親指違反を修復し直す（落とすだけ
+            # なので収束する。フリックは protected で残す）
+            for _ in range(50):
+                before_r = {d: len(s2) for d, s2 in id_sets.items()}
+                id_sets = repair_runs(id_sets, notes_by_id, protected=flick_protected)
+                id_sets = repair_side_runs(id_sets, notes_by_id, chord_ids, protected=flick_protected)
+                if all(len(id_sets[d]) == before_r[d] for d in before_r):
+                    break
+            else:
+                raise AssertionError(f"{song_id}: 被覆後の修復が収束しない")
+            if all(
+                coverage_max_gap_ms(d) <= VOCAL_COVER_GAP_S[d] * 1000
+                for d in ("easy", "normal", "hard")
+            ):
+                break
+        for d in ("easy", "normal", "hard"):
+            after = len(id_sets[d])
+            vocal_coverage_report["diffs"][d] = {
+                "gapCapMs": int(VOCAL_COVER_GAP_S[d] * 1000),
+                "maxGapMsAfter": coverage_max_gap_ms(d),
+                "fromPool": vocal_coverage_stats[d]["fromPool"],
+                "synthesized": vocal_coverage_stats[d]["synthesized"],
+                "unfilledGaps": vocal_coverage_stats[d]["unfilledGaps"],
+                "countsBefore": counts_before[d],
+                "countsAfter": after,
+                "cap": caps_by_diff[d],
+                "capExceeded": after > caps_by_diff[d],
+            }
+            if after > caps_by_diff[d]:
+                print(
+                    f"  v6-4 {song_id}/{d}: 被覆補填で総数キャップ超過"
+                    f" {after} > {caps_by_diff[d]}（保証優先で許容）"
+                )
+        print(
+            f"  v6-4 {song_id}: vocalCoverage="
+            f"{json.dumps(vocal_coverage_report['diffs'], ensure_ascii=False)}"
+        )
+
     def final_notes(diff, ids):
         seq = sorted((notes_by_id[i] for i in ids), key=lambda n: (n["time_ms"], n["lane"]))
         out = []
@@ -2723,6 +3171,7 @@ def process_song(song_id, meta, y, sr):
         "flickPositionsFinal": flick_final_report,
         "flickFlowLog": flow_log,
         "flickShapeStats": shape_stats,
+        "vocalCoverage": vocal_coverage_report,
     }
     print(f"{song_id}: BPM={bpm:.2f} -> {int(round(bpm))} counts={counts}")
     print(f"  diffs={json.dumps(rep['diffs'], ensure_ascii=False)} lanes={rep['lanes']}")
@@ -2735,6 +3184,16 @@ def process_song(song_id, meta, y, sr):
 
 
 def main() -> int:
+    # v6-4: --lyrics <path> で歌詞タイミングの入力ファイルを差し替えられる
+    # （形式は normalize_lyric_intervals 参照。未指定なら曲別メタデータ／
+    # 既定ファイル src/game/data/lyrics.json から解決する）
+    argv = sys.argv[1:]
+    explicit_lyrics = None
+    if "--lyrics" in argv:
+        lp = Path(argv[argv.index("--lyrics") + 1])
+        if not lp.is_absolute():
+            lp = ROOT / lp
+        explicit_lyrics = json.loads(lp.read_text(encoding="utf-8"))
     out = {}
     report = {}
     with tempfile.TemporaryDirectory() as td:
@@ -2742,7 +3201,12 @@ def main() -> int:
             wav = Path(td) / f"{song_id}.wav"
             to_wav(ROOT / meta["audio"], wav)
             y, sr = librosa.load(str(wav), sr=SR, mono=True)
-            song_json, rep = process_song(song_id, meta, y, sr)
+            song_lyrics = (
+                normalize_lyric_intervals(explicit_lyrics, song_id)
+                if explicit_lyrics is not None
+                else None
+            )
+            song_json, rep = process_song(song_id, meta, y, sr, lyric_intervals=song_lyrics)
             out[song_id] = song_json
             report[song_id] = rep
     # 両親指制約の最終検証: 違反が残っていたら書き出さない（チェッカーが正本）
