@@ -8,8 +8,12 @@
 import './game.css';
 import {
 DIFFICULTIES,
+SPEED_DEFAULT,
+SPEED_STEP,
 clampOffset,
+clampSpeed,
 isFullCombo,
+isNewBest,
 type ComboAppearance,
 type Difficulty,
 type LatencyStats,
@@ -29,7 +33,7 @@ import {
   type DebugAction,
 } from '../debug';
 import { detectPlatform } from '../install';
-import { isSoundOn, playResultJingle, playSwipeSound, playUiClick, preloadHitSample, setSound } from './sound';
+import { isSoundOn, playGameOverSound, playResultJingle, playResultVoices, playSwipeSound, playUiClick, preloadHitSample, preloadResultVoices, setSound, type ResultVoice } from './sound';
 import { isVibrateOn, setVibrate } from './haptics';
 import { audioContext, audioState, isUnlocked, unlockAudio } from './audio';
 import { load, migrateStorage, requestPersist, save } from './storage';
@@ -50,6 +54,10 @@ function initGameMode(): { enter: () => void; exit: () => void } {
   let selectedDiff: Difficulty = load<Difficulty>('difficulty', 'easy');
   if (!(selectedDiff in DIFFICULTIES)) selectedDiff = 'easy';
   let offsetMs = clampOffset(load<number>('offset', 0));
+  // 音符の落下速度の倍率（プレイヤー設定。×1.0 がいままでの速度）
+  let speedMul = clampSpeed(load<number>('speed', SPEED_DEFAULT));
+  // ビジュアライザーは周波数バー固定で設定はない（オーナー決定 2026-11-23）。
+  // 過去に保存したスタイル値（storage キー visualizer）は読まれない。
   // 効果音と歌詞表示のオンオフは廃止した（オーナー指示 2026-11-20）。どちらも常にオン。
   // 過去にオフで保存した端末でも戻せるよう、起動時に効果音をオンへ上書きしておく
   setSound(true);
@@ -342,10 +350,12 @@ function initGameMode(): { enter: () => void; exit: () => void } {
       else img.onload = apply;
     }
     $('offset-value').textContent = `${offsetMs > 0 ? '+' : ''}${offsetMs}ms`;
+    $('speed-value').textContent = `×${speedMul.toFixed(1)}`;
     renderToggle('vibrate-button', isVibrateOn());
     setData('song', selectedSong);
     setData('difficulty', selectedDiff);
     setData('offset', offsetMs);
+    setData('speed', speedMul);
     setData('sound', isSoundOn() ? 'on' : 'off');
     setData('vibrate', isVibrateOn() ? 'on' : 'off');
     setData('lyrics', 'on');
@@ -363,6 +373,16 @@ function initGameMode(): { enter: () => void; exit: () => void } {
   }
   $('offset-minus').addEventListener('click', () => setOffset(offsetMs - 10));
   $('offset-plus').addEventListener('click', () => setOffset(offsetMs + 10));
+  function setSpeed(next: number): void {
+    const clamped = clampSpeed(next);
+    if (clamped === speedMul) return;
+    speedMul = clamped;
+    save('speed', speedMul);
+    renderMenu();
+    playUiClick();
+  }
+  $('speed-minus').addEventListener('click', () => setSpeed(speedMul - SPEED_STEP));
+  $('speed-plus').addEventListener('click', () => setSpeed(speedMul + SPEED_STEP));
   $('vibrate-button').addEventListener('click', () => {
     setVibrate(!isVibrateOn());
     renderMenu();
@@ -427,6 +447,10 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     },
     onFinish: (stats) => {
       latencyResult = stats;
+      // 計測が終わったら、その場でオフセットへ自動で反映する（反映ボタンは廃止した）。
+      // 符号は logic.ts の遅延チェックの約束どおり: 拍より遅れてタップした量（+）を
+      // そのままオフセットにする（ノーツの判定時刻が後ろへずれて、遅れを打ち消せる）
+      setOffset(Math.round(stats.meanMs));
       latencyUi = 'done';
       renderLatency();
     },
@@ -434,38 +458,34 @@ function initGameMode(): { enter: () => void; exit: () => void } {
 
   function renderLatency(): void {
     setData('latency', latencyUi);
-    const start = $<HTMLButtonElement>('latency-start');
     const tap = $<HTMLButtonElement>('latency-tap');
     if (latencyUi === 'idle') {
-      $('latency-status').textContent = '「スタート」を押すと拍が流れます';
       $('latency-result').hidden = true;
       tap.disabled = true;
-      start.disabled = false;
-      start.textContent = 'スタート';
     } else if (latencyUi === 'running') {
       $('latency-result').hidden = true;
       tap.disabled = false;
-      start.disabled = true;
     } else {
       if (latencyResult) {
-        const mean = Math.round(latencyResult.meanMs);
-        $('latency-mean').textContent = `${mean > 0 ? '+' : ''}${mean}ms`;
-        $('latency-std').textContent = String(Math.round(latencyResult.stddevMs));
+        // 表示は、実際にオフセットへ入った値（10ms刻みに丸め・範囲内に収めたもの）に合わせる
+        const applied = clampOffset(Math.round(latencyResult.meanMs));
+        $('latency-mean').textContent = `${applied > 0 ? '+' : ''}${applied}ms`;
       }
       $('latency-status').textContent = '計測が終わりました';
       $('latency-result').hidden = false;
       tap.disabled = true;
-      start.disabled = false;
-      start.textContent = 'もう一度測る';
     }
   }
 
   function openLatency(): void {
+    // 開いたらすぐ計測を始める（スタートボタンは廃止した）
     latencyCheck.stop();
-    latencyUi = 'idle';
+    latencyUi = 'running';
     latencyResult = null;
     renderLatency();
     if (!latencyDialog.open) latencyDialog.showModal();
+    unlockAudio();
+    latencyCheck.start();
   }
   function closeLatency(): void {
     latencyCheck.stop();
@@ -473,30 +493,16 @@ function initGameMode(): { enter: () => void; exit: () => void } {
   }
   $('latency-open').addEventListener('click', openLatency);
   $('latency-close').addEventListener('click', closeLatency);
-  $('latency-cancel').addEventListener('click', closeLatency);
   latencyDialog.addEventListener('close', () => {
-    // Esc・✕・「やめる」で閉じた場合も、計測を止めて何も反映しない
+    // Esc・✕で閉じた場合も計測を止める。途中で閉じたら何も反映しない
+    // （反映は計測が終わった瞬間にだけ行うので、完了後に閉じても反映済みのまま）
     latencyCheck.stop();
     latencyUi = 'idle';
     latencyResult = null;
     renderLatency();
   });
-  $('latency-start').addEventListener('click', () => {
-    unlockAudio();
-    latencyUi = 'running';
-    latencyResult = null;
-    renderLatency();
-    latencyCheck.start();
-  });
   // タップは pointerdown で受ける（click より遅延が小さい。ゲーム本体の入力と同じ方式）
   $('latency-tap').addEventListener('pointerdown', () => latencyCheck.tap());
-  $('latency-apply').addEventListener('click', () => {
-    if (!latencyResult) return;
-    // 符号は logic.ts の遅延チェックの約束どおり: 拍より遅れてタップした量（+）を
-    // そのままオフセットにする（ノーツの判定時刻が後ろへずれて、遅れを打ち消せる）
-    setOffset(Math.round(latencyResult.meanMs));
-    closeLatency();
-  });
   renderLatency();
 
   // ---- コンボ演出の登場（30コンボごと）と歌詞表示 ----
@@ -560,8 +566,20 @@ function initGameMode(): { enter: () => void; exit: () => void } {
   // ---- ゲーム ----
   const game = new Game($<HTMLCanvasElement>('game-canvas'), $<HTMLCanvasElement>('notes-canvas'), {
     onFinish: (result) => {
-      // 結果発表ジングル（アプリ内合成、オーナー指示 2026-11-21 で A 案採用）を
-      // 鳴らしてから結果カードを出す。効果音オフのときはジングルなし（待ちなし）で
+      // ゲームオーバー（ライフが尽きた失敗）のときは、ジングルの代わりに
+      // ゲームオーバー音（アプリ内合成）を鳴らし始めてから、
+      // 少し待って失敗の結果カードを出す。効果音オフのときは待ちなしで即表示
+      if (result.failed) {
+        const waitMs = playGameOverSound();
+        if (waitMs > 0) {
+          window.setTimeout(() => showResult(result), waitMs);
+        } else {
+          showResult(result);
+        }
+        return;
+      }
+      // 結果発表ジングル（アプリ内合成）を鳴らし始めてから、少し待って
+      // 結果カードを出す。効果音オフのときはジングルなし（待ちなし）で
       // 即表示する。（2026-11-20 の「締めの演出は挟まず結果へ直行」はこの指示で置換。
       // フルコンボの印は従来どおり結果カードの中に出す）
       const waitMs = playResultJingle(result.rank);
@@ -636,6 +654,8 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     unlockAudio();
     // ヒット音のサンプル素材も先読みしておく（最初のヒットで読み込み待ちにならないように）
     preloadHitSample();
+    // 結果ボイスの素材も先読みしておく（結果表示の瞬間に鳴らし始めるため）
+    preloadResultVoices();
     const entry = songById(selectedSong);
     lastEntry = entry;
     lastDiff = selectedDiff;
@@ -646,7 +666,7 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     try {
       show('game');
       // オートプレイはデバッグモードがオンのときだけ効く
-      await game.start(entry, selectedDiff, offsetMs, isDebug() && autoplayOn);
+      await game.start(entry, selectedDiff, offsetMs, isDebug() && autoplayOn, speedMul);
       status.textContent = '';
     } catch {
       show('menu');
@@ -661,25 +681,49 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     const bests = loadBests();
     const key = bestKey(lastEntry.id, lastDiff);
     // オートプレイの結果はベストスコアに残さない（表示は保存済みのベストのまま）。
+    // ゲームオーバー（失敗）の結果もベストスコア・ベストランクを更新しない。
     // ベストを更新したときは、その回のランクも一緒に保存する（メニューのパネルに出す）
     const prev = bests[key];
-    const best = result.autoplay ? (prev?.score ?? 0) : Math.max(prev?.score ?? 0, result.score);
-    if (!result.autoplay && result.score >= (prev?.score ?? 0)) {
+    const best = result.autoplay || result.failed ? (prev?.score ?? 0) : Math.max(prev?.score ?? 0, result.score);
+    if (!result.autoplay && !result.failed && result.score >= (prev?.score ?? 0)) {
       bests[key] = { score: best, rank: result.rank };
       save('best', bests);
     }
+    // ハイスコア更新（保存済みベストを上回った回だけ。初回プレイでベストが
+    // 作られる回も含む。オートプレイ・失敗の回はベストを更新しないので対象外）
+    const newRecord = !result.autoplay && !result.failed && isNewBest(prev?.score, result.score);
+    const fullCombo = !result.failed && isFullCombo(result.counts);
     $('result-rank').textContent = result.rank;
+    // ゲームオーバーの回はランクを出さない（オーナー指示 2026-11-22「ゲームオーバーはランクなしでいい」）
+    $('result-rank').hidden = result.failed;
+    $('result-gameover').hidden = !result.failed;
     $('result-autoplay').hidden = !result.autoplay;
-    $('result-fullcombo').hidden = !isFullCombo(result.counts);
+    // 失敗の回にフルコンボの印は出さない（全 GOOD でも GOOD の −1 が積もればライフは尽きうる）
+    $('result-fullcombo').hidden = !fullCombo;
+    $('result-newrecord').hidden = !newRecord;
     $('result-song').textContent = `${result.songTitle}（${DIFFICULTIES[lastDiff].label}）`;
     $('result-score').textContent = String(result.score);
     $('result-best').textContent = String(best);
     $('result-counts').textContent = `PERFECT ${result.counts.perfect} / GREAT ${result.counts.great} / GOOD ${result.counts.good} / MISS ${result.counts.miss}`;
     $('result-accuracy').textContent = result.accuracy.toFixed(1);
     $('result-combo').textContent = String(result.maxCombo);
-    $('game-live').textContent = `結果: ランク${result.rank}、スコア${result.score}、精度${result.accuracy.toFixed(1)}%${isFullCombo(result.counts) ? '、フルコンボ' : ''}${result.autoplay ? '（オートプレイ）' : ''}`;
+    // 失敗の回は「次の曲」へ進めない（もう一度／メニューへのみ）
+    $('next-button').hidden = result.failed;
+    // 読み上げも、ゲームオーバーの回はランクを読み上げない（「ゲームオーバー」＋成績の形）
+    $('game-live').textContent = result.failed
+      ? `結果: ゲームオーバー、スコア${result.score}、精度${result.accuracy.toFixed(1)}%${result.autoplay ? '（オートプレイ）' : ''}`
+      : `結果: ランク${result.rank}、スコア${result.score}、精度${result.accuracy.toFixed(1)}%${fullCombo ? '、フルコンボ' : ''}${newRecord ? '、ハイスコア更新' : ''}${result.autoplay ? '（オートプレイ）' : ''}`;
     show('result');
     renderMenu();
+    // 達成ボイスは結果カードが出た瞬間に鳴らす（ジングルの頭は表示待ちの間に
+    // 鳴り終わっている。両方達成なら フルコンボ→ハイスコア更新 の順に続ける。
+    // ゲームオーバーの回はどちらも鳴らさない）
+    if (!result.failed) {
+      const voices: ResultVoice[] = [];
+      if (fullCombo) voices.push('fullcombo');
+      if (newRecord) voices.push('newrecord');
+      playResultVoices(voices);
+    }
   }
   $('again-button').addEventListener('click', () => {
     selectedSong = lastEntry.id;
@@ -700,9 +744,13 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     show('menu');
     renderMenu();
   });
-  // 中断の確認カード: 「つづける」は READY をはさんで再開、「メニューに戻る」は記録せずメニューへ
+  // 中断の確認カード: 「つづける」は READY をはさんで再開、「はじめからやりなおす」は
+  // 同じ曲・難易度を頭から開始し直す、「メニューに戻る」は記録せずメニューへ
   $('pause-resume-button').addEventListener('click', () => {
     game.resume();
+  });
+  $('pause-retry-button').addEventListener('click', () => {
+    game.restart();
   });
   $('pause-abort-button').addEventListener('click', () => {
     game.abort();
@@ -717,7 +765,9 @@ function initGameMode(): { enter: () => void; exit: () => void } {
       song: selectedSong,
       difficulty: selectedDiff,
       offset: offsetMs,
+      speed: speedMul,
       playing: game.isPlaying,
+      life: game.lifeValue,
       songMs: game.songPositionMs(),
       sound: isSoundOn(),
       vibrate: isVibrateOn(),
@@ -736,6 +786,7 @@ function initGameMode(): { enter: () => void; exit: () => void } {
       }
       if (typeof patch.difficulty === 'string' && patch.difficulty in DIFFICULTIES) selectedDiff = patch.difficulty as Difficulty;
       if (typeof patch.offset === 'number') offsetMs = clampOffset(patch.offset);
+      if (typeof patch.speed === 'number') speedMul = clampSpeed(patch.speed);
       if (typeof patch.debugMode === 'boolean') {
         // デバッグモードは CD 側と共有の旗（バージョン表示の5回タップと同じもの）
         setDebug(patch.debugMode);

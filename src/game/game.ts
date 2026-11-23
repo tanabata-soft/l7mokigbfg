@@ -5,16 +5,31 @@
 // 演出（粒子・輪・波紋・判定文字）はすべて経過時間ベースで進める（120Hz でも 60Hz と同じ見え方にする）。
 import {
   DIFFICULTIES,
+  FLICK_MIN_UP_PX,
+  FLICK_TIME_LIMIT_MS,
   HOLD_COMPLETE_BONUS,
   HOLD_TICK_SCORE,
   LANE_COLORS,
+  HIT_Y_RATIO,
+  SPEED_DEFAULT,
+  VISUALIZER_FREQ_BARS,
+  groupFreqBins,
   advanceHold,
   beginHold,
+  clampSpeed,
   comboAppearance,
   comboTier,
+  effectiveFallSeconds,
   emptyCounts,
+  findFlickHit,
   findHit,
+  findKeyboardHit,
+  findNearestNote,
   isComboShow,
+  LIFE_MAX,
+  applyLifeDelta,
+  isLifeGameOver,
+  lifeZone,
   lyricIndexAt,
   makePlayNotes,
   rankFor,
@@ -36,8 +51,8 @@ import {
 } from './logic';
 import type { SongEntry } from './charts';
 import { COMBO_PATTERNS, COMBO_SHOW_CONFIG, comboPatternDef } from './presentation';
-import { audioContext, loadBuffer, nowSeconds, playBuffer, recreateAudioContext, resumeAudio, stopCurrent, unlockAudio } from './audio';
-import { playCompleteSound, playEmptySound, playFailSound, playHitSound, startHoldSound, stopAllHoldSounds, stopHoldSound } from './sound';
+import { audioContext, loadBuffer, musicAnalyser, nowSeconds, playBuffer, recreateAudioContext, resumeAudio, stopCurrent, unlockAudio } from './audio';
+import { playCompleteSound, playEmptySound, playFailSound, playFlickSound, playHitSound, playMissSound, startHoldSound, stopAllHoldSounds, stopHoldSound } from './sound';
 import { vibrateHit } from './haptics';
 import { setData } from '../debug';
 
@@ -51,6 +66,8 @@ export interface GameResult {
   rank: Rank;
   /** オートプレイで演奏したか（true の回はベストスコアに残さない） */
   autoplay: boolean;
+  /** ライフが尽きてゲームオーバーになったか（true の回はベストスコアに残さない） */
+  failed: boolean;
 }
 
 export interface GameCallbacks {
@@ -65,15 +82,32 @@ export interface GameCallbacks {
   onLyric(index: number): void;
 }
 
-const HIT_Y_RATIO = 0.82;
+// 判定ラインの高さは H×0.74 で固定（タッチ位置「上」。logic.ts の HIT_Y_RATIO）。
+// Game.hitY() を参照
 const READY_SECONDS = 2;
-/** 左上の中断ボタン（描画とタップ判定で共有する。オーナー指示 2026-11-21: × ではなく「❚❚ 中断」） */
-const PAUSE_BTN = { x: 10, y: 10, w: 100, h: 38 };
+/**
+ * 左上の中断ボタン（描画とタップ判定で共有する）。v1.4.9 の上部 UI 見直し
+ * （オーナー承認済みのモック）で、「❚❚ 中断」の文字付き横長ボタン（100×38）から
+ * ❚❚ アイコンだけの丸ボタン（直径 40px）に変更した。中心は旧ボタンと同じ (30, 29)。
+ */
+const PAUSE_BTN = { cx: 30, cy: 29, r: 20 };
+/** スコアのフォント（描画と、メーターの横幅を決める実測で共有する） */
+const SCORE_FONT = 'bold 18px sans-serif';
+/** スコアの baseline（上部1行の中心 = PAUSE_BTN.cy に文字が揃う位置） */
+const SCORE_BASELINE_Y = 35;
 /** 中断確認で「つづける」を押してから演奏が戻るまでの READY の時間（壁時計 ms） */
 const RESUME_COUNTDOWN_MS = 1000;
 const JUDGE_LABEL: Record<Judge, string> = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', miss: 'MISS' };
 const JUDGE_COLOR: Record<Judge, string> = { perfect: '#ffd166', great: '#4ecdc4', good: '#9aa8ff', miss: '#ff6b6b' };
-const GOLD = '#ffd166';
+
+/** ライフの帯ごとの色（十分=緑 / 注意=黄 / 危険=赤） */
+const LIFE_COLORS: Record<'safe' | 'caution' | 'danger', string> = { safe: '#3ddc84', caution: '#ffd23f', danger: '#ff5252' };
+/**
+ * ライフメーターの置き場所（座標はステージ内）。v1.4.9 の上部 UI 見直しで、
+ * 中断ボタン・スコアと同じ1行（中心 y = PAUSE_BTN.cy）に集約し、背景パネルは撤去した。
+ * バーは中断ボタンの右から、右端のスコアの左に収まる幅で引く。
+ */
+const LIFE_METER = { meterX: 62, meterY: 25, meterH: 8, scoreGap: 10, edgeGap: 14 };
 
 /** コンボ段階ごとのベール（暗幕）の濃さ。段階が上がるほど薄くなり、ジャケットが冴える */
 const TIER_VEIL_ALPHA = [0.62, 0.57, 0.52, 0.46, 0.4] as const;
@@ -126,11 +160,55 @@ interface Ripple {
   life: number;
   c: string;
 }
+/** フリック成功時に上へ飛んで消えるシェブロン（∧） */
+interface FlickChev {
+  x: number;
+  /** 出現位置 (y)。上昇は age から計算する */
+  y: number;
+  age: number;
+  life: number;
+}
 
 const RING_LIFE = 0.32;
 const POP_LIFE = 0.18;
 const RIPPLE_LIFE = 0.38;
 const JUDGE_LIFE = 0.55;
+/** フリック表示は大きなブロック矢印（↑）だけ（オーナー決定 2026-11-23、確定仕様）:
+ * 四角いノーツ本体（レーン色の塗り＋枠＋シェブロン）は描かず、矢印を従来ノーツの
+ * 中心位置に置く。塗りはそのレーンの色、縁取りは濃紺。経緯: 案A（濃紺太枠＋水色
+ * シェブロン）でも「まだ見にくい」とのオーナー指摘を受け、ノーツの上に矢印を
+ * 飛び出させる案のプレビュー（マゼンタ／オレンジ／白）を経て、オーナーの
+ * 「四角いのなしで矢印だけならどう？」で矢印だけ案に決まり、塗り＝レーン色・
+ * 縁取り＝濃紺で確定した */
+/** 矢印の高さ (px) */
+const FLICK_ARROW_HEIGHT = 60;
+/** 矢印の縁取り色（ほぼ黒に近い紺） */
+const FLICK_ARROW_OUTLINE_COLOR = '#0a1030';
+/** 矢印の縁取りの太さ (px)。脈動の位相によらず画面上でこの太さに保つ */
+const FLICK_ARROW_OUTLINE_WIDTH = 5;
+/** 矢印の脈動: 周期（秒）と最大拡縮率（1.0〜この値の間を sin で往復する） */
+const FLICK_ARROW_PULSE_PERIOD_SEC = 0.85;
+const FLICK_ARROW_PULSE_MAX = 1.15;
+/** フリック成功時に飛ぶシェブロンの色（水色。演出は従来どおり） */
+const FLICK_CHEVRON_COLOR = '#3fd9ff';
+
+// ---- オーディオビジュアライザー（プレイ画面の下部スペース） ----
+// タッチ位置「上」固定で空いた判定ラインの下の領域に、曲の周波数を描く。
+// スタイルは周波数バー固定（オーナー決定 2026-11-23。当初は4種を設定で
+// 切り替えたが、実機確認を経て固定に変更し、設定は撤去した）。
+// 領域は v1.4.21 の描画領域（390×844 基準で x 12..378、y 652..834）を
+// 幅・高さとも約 3/4 に縮小し、横は中央寄せ、下端は画面の下端の 6px 上まで
+// 下げた（同日のオーナー調整指示）。色味も同指示でさらに抑えてある。
+/** 周波数バー: 下端→上端のグラデーション（彩度・明度を落としたティール） */
+const VIZ_BAR_BOTTOM = '#26525b';
+const VIZ_BAR_TOP = '#4f7a82';
+/** 周波数バー本体の不透明度（0..1。v1.4.21 の 215/255 から引き下げ） */
+const VIZ_BAR_ALPHA = 165 / 255;
+/** 周波数バーの上端キャップの不透明度（0..1。v1.4.21 の 230/255 から引き下げ） */
+const VIZ_BAR_CAP_ALPHA = 180 / 255;
+/** フリック成功時に飛ぶシェブロンの寿命（秒）と上昇距離 (px) */
+const FLICK_CHEV_LIFE = 0.35;
+const FLICK_CHEV_RISE_PX = 60;
 /** コンボ演出の登場時の紙吹雪の色 */
 const CONFETTI_COLORS = ['#ff6b6b', '#ffd166', '#4ecdc4', '#6c8cff', '#ff8ad8', '#ffffff'];
 /** コンボ演出の絵の読み込み済み Image（パターンごとに 1 回だけ作る。素材スロットに絵があるパターンだけ） */
@@ -225,10 +303,14 @@ export class Game {
 
   private entry: SongEntry | null = null;
   private difficulty: Difficulty = 'easy';
+  /** start で受け取った判定オフセット（中断確認の「はじめからやりなおす」で同じ条件で開始し直すため保持する） */
+  private offsetMs = 0;
   /** オートプレイ中か（設定のデバッグモード配下。start で受け取る） */
   private autoplay = false;
   private notes: PlayNote[] = [];
   private counts: JudgementCounts = emptyCounts();
+  /** ライフ（0〜LIFE_MAX）。判定の発生順に増減するので counts からは再計算しない */
+  private life = LIFE_MAX;
   private score = 0;
   private combo = 0;
   private maxCombo = 0;
@@ -257,6 +339,7 @@ export class Game {
   private rings: Ring[] = [];
   private pops: Pop[] = [];
   private ripples: Ripple[] = [];
+  private flickChevs: FlickChev[] = [];
   private judgeText = '';
   private judgeColor = '#fff';
   private judgeTier = 0; // 判定文字を出した時点のコンボ tier（大きさ・色に使う）
@@ -267,6 +350,18 @@ export class Game {
   private height = 0;
   /** 押さえ中のポインタ（pointerId → レーン）。マルチタッチで長押ししながら他レーンを叩ける */
   private pointerLanes = new Map<number, number>();
+  /** フリック検出用の、ポインタごとの押し始めの記録（位置・壁時計・発火済みか） */
+  private pointerGestures = new Map<number, { startY: number; startWall: number; flicked: boolean }>();
+  /** 音符の落下速度の倍率（プレイヤー設定。start で受け取る） */
+  private speed = SPEED_DEFAULT;
+  /** 判定ラインの y 座標（px）。タッチ位置「上」固定（H×0.74） */
+  private hitY(): number {
+    return this.height * HIT_Y_RATIO;
+  }
+  // ビジュアライザーの解析データの使い回しバッファと、取得の間引きカウンタ
+  // （2フレームに1回だけ取る）
+  private vizFreq: Uint8Array<ArrayBuffer> | null = null;
+  private vizFrame = 0;
   /** 押さえ中のキー（レーン） */
   private keyLanes = new Set<number>();
   private holdsCompleted = 0;
@@ -282,7 +377,10 @@ export class Game {
     const rect = this.canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
-    if (px >= PAUSE_BTN.x && px <= PAUSE_BTN.x + PAUSE_BTN.w && py >= PAUSE_BTN.y && py <= PAUSE_BTN.y + PAUSE_BTN.h) {
+    // 中断ボタンは丸ボタン: 中心からの距離が半径以内なら当たったことにする
+    const pdx = px - PAUSE_BTN.cx;
+    const pdy = py - PAUSE_BTN.cy;
+    if (pdx * pdx + pdy * pdy <= PAUSE_BTN.r * PAUSE_BTN.r) {
       this.pause();
       return;
     }
@@ -290,6 +388,7 @@ export class Game {
     if (this.autoplay) return;
     const lane = this.laneAt(px);
     this.pointerLanes.set(e.pointerId, lane);
+    this.pointerGestures.set(e.pointerId, { startY: py, startWall: performance.now(), flicked: false });
     try {
       this.canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -305,6 +404,20 @@ export class Game {
     const rect = this.canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    // フリック検出: 押し始めから短時間に、上へ大きく動いたらフリックとして発火する
+    // （ポインタごとに1回まで）。縦の動きは基本は同じレーン内で起きる
+    const gesture = this.pointerGestures.get(e.pointerId);
+    if (
+      gesture &&
+      !gesture.flicked &&
+      !this.paused &&
+      gesture.startY - py >= FLICK_MIN_UP_PX &&
+      performance.now() - gesture.startWall <= FLICK_TIME_LIMIT_MS
+    ) {
+      gesture.flicked = true;
+      this.flickLane(prev, px, py);
+      return;
+    }
     const lane = this.laneAt(px);
     if (lane === prev) return;
     // 指がレーンをまたいだら、旧レーンは離した扱い、新レーンは押した扱いにする
@@ -315,6 +428,7 @@ export class Game {
 
   private onPointerUp = (e: PointerEvent): void => {
     const lane = this.pointerLanes.get(e.pointerId);
+    this.pointerGestures.delete(e.pointerId);
     if (lane === undefined) return;
     this.pointerLanes.delete(e.pointerId);
     if (this.playing) this.releaseLane(lane);
@@ -324,6 +438,7 @@ export class Game {
     // ポインタ捕捉が強制的に外れたとき（バックグラウンド遷移など）は、
     // pointerup が来ないことがある。捕捉を失った時点で「離した」扱いにする
     const lane = this.pointerLanes.get(e.pointerId);
+    this.pointerGestures.delete(e.pointerId);
     if (lane === undefined) return;
     this.pointerLanes.delete(e.pointerId);
     if (this.playing) this.releaseLane(lane);
@@ -338,7 +453,7 @@ export class Game {
     const lane = 'dfjk'.indexOf(e.key.toLowerCase());
     if (lane < 0) return;
     this.keyLanes.add(lane);
-    this.pressLane(lane);
+    this.pressLane(lane, undefined, undefined, true);
   };
 
   private onKeyUp = (e: KeyboardEvent): void => {
@@ -388,6 +503,7 @@ export class Game {
    */
   private resetInput(): void {
     this.pointerLanes.clear();
+    this.pointerGestures.clear();
     this.keyLanes.clear();
     if (!this.playing) return;
     const nowMs = (nowSeconds() - this.startAt) * 1000;
@@ -452,6 +568,11 @@ export class Game {
     return this.autoplay;
   }
 
+  /** テスト用の入口向け: 現在のライフ（0〜LIFE_MAX） */
+  get lifeValue(): number {
+    return this.life;
+  }
+
   /** テスト用の入口向け: 曲の現在位置（ms。READY 中は負、演奏中でなければ -1） */
   songPositionMs(): number {
     if (!this.playing) return -1;
@@ -459,8 +580,14 @@ export class Game {
     return (nowSeconds() - this.startAt) * 1000;
   }
 
-  /** 曲を読み込んで演奏を始める。読み込み済みなら即座に始まる。autoplay は設定のデバッグモード配下のオートプレイ */
-  async start(entry: SongEntry, difficulty: Difficulty, offsetMs: number, autoplay = false): Promise<void> {
+  /** 曲を読み込んで演奏を始める。読み込み済みなら即座に始まる。autoplay は設定のデバッグモード配下のオートプレイ。speed は音符の落下速度の倍率（プレイヤー設定） */
+  async start(
+    entry: SongEntry,
+    difficulty: Difficulty,
+    offsetMs: number,
+    autoplay = false,
+    speed = SPEED_DEFAULT,
+  ): Promise<void> {
     // スタート操作のジェスチャの中で呼ばれる前提で、まず音声を unlock する
     unlockAudio();
     const session = ++this.startSession;
@@ -479,10 +606,13 @@ export class Game {
     this.paused = false;
     this.entry = entry;
     this.difficulty = difficulty;
+    this.offsetMs = offsetMs;
     this.autoplay = autoplay;
+    this.speed = clampSpeed(speed);
     setData('autoplay', autoplay ? 'on' : 'off');
     this.notes = makePlayNotes(entry.data.charts[difficulty], offsetMs);
     this.counts = emptyCounts();
+    this.life = LIFE_MAX;
     this.score = 0;
     this.combo = 0;
     this.maxCombo = 0;
@@ -492,8 +622,10 @@ export class Game {
     this.rings = [];
     this.pops = [];
     this.ripples = [];
+    this.flickChevs = [];
     this.flash = [0, 0, 0, 0];
     this.pointerLanes.clear();
+    this.pointerGestures.clear();
     this.keyLanes.clear();
     stopAllHoldSounds();
     this.holdsCompleted = 0;
@@ -630,6 +762,19 @@ export class Game {
     this.cb.onPause(true);
   }
 
+  /**
+   * 確認カードの「はじめからやりなおす」（オーナー指示 2026-11-22）。確認は挟まず、
+   * カードを閉じて同じ曲・難易度・設定（オフセット／オートプレイ／速度）の
+   * まま start し直す。スコア・コンボ・ライフ・判定カウントは start 側でリセットされ、
+   * 曲は頭から鳴る
+   */
+  restart(): void {
+    if (!this.playing || !this.paused || this.pausePhase !== 'confirm' || !this.entry) return;
+    const entry = this.entry;
+    this.cb.onPause(false);
+    void this.start(entry, this.difficulty, this.offsetMs, this.autoplay, this.speed);
+  }
+
   /** 確認カードの「つづける」。カードを閉じ、READY（1秒）をはさんで再開する */
   resume(): void {
     if (!this.playing || !this.paused || this.pausePhase !== 'confirm') return;
@@ -675,23 +820,28 @@ export class Game {
     return false;
   }
 
-  private pressLane(lane: number, rippleX?: number, rippleY?: number): void {
-    // 保険: 再生中に AudioContext が止まっていたら（iOS の interrupted など）、タップのついでに戻す。
-    // resume だけでは戻らないことがあるため、ジェスチャの中で効く強い unlock（resume＋
-    // 音声セッション再設定＋無音バッファ）を使う（2026-11-20 実機で「READY のまま
-    // タッチできない」症状が出たための強化）
-    if (audioContext().state !== 'running' || this.audioFrozen) unlockAudio();
+  /** レーンを叩いたときの共通の見た目（フラッシュ＋波紋）。タップとフリックで共用する */
+  private laneTapFx(lane: number, rippleX?: number, rippleY?: number): void {
     this.flash[lane] = 1;
     // 押した場所に波紋を出す（キーボードのときはレーンの判定ライン中央）
     const lw = this.width / 4;
     this.ripples.push({
       x: rippleX ?? lane * lw + lw / 2,
-      y: rippleY ?? this.height * HIT_Y_RATIO,
+      y: rippleY ?? this.hitY(),
       age: 0,
       life: RIPPLE_LIFE,
       c: LANE_COLORS[lane],
     });
     if (this.ripples.length > 24) this.ripples.shift();
+  }
+
+  private pressLane(lane: number, rippleX?: number, rippleY?: number, viaKeyboard = false): void {
+    // 保険: 再生中に AudioContext が止まっていたら（iOS の interrupted など）、タップのついでに戻す。
+    // resume だけでは戻らないことがあるため、ジェスチャの中で効く強い unlock（resume＋
+    // 音声セッション再設定＋無音バッファ）を使う（2026-11-20 実機で「READY のまま
+    // タッチできない」症状が出たための強化）
+    if (audioContext().state !== 'running' || this.audioFrozen) unlockAudio();
+    this.laneTapFx(lane, rippleX, rippleY);
     const nowMs = (nowSeconds() - this.startAt) * 1000;
     // 猶予（grace）中の長押しがあれば、新しいノーツより先に押し直しとして扱う
     for (const n of this.notes) {
@@ -702,9 +852,28 @@ export class Game {
         return;
       }
     }
-    const hit = findHit(this.notes, lane, nowMs);
+    // いちばん近い未判定ノーツがフリックノーツなら、この押しはフリック操作の
+    // 始まりとして扱い、タップ判定も空振り音も出さない（フリック必須。
+    // 指を離すだけでは取れず、窓を過ぎれば通常のミスになる）。
+    // キーボードだけは例外: フリックのジェスチャが無いので、フリックノーツも
+    // 通常のタップと同じキー押しでそのまま取る（オーナー指示 2026-11-22）
+    if (!viaKeyboard && findNearestNote(this.notes, lane, nowMs)?.flick) return;
+    const hit = viaKeyboard ? findKeyboardHit(this.notes, lane, nowMs) : findHit(this.notes, lane, nowMs);
     if (!hit) {
       // ノーツのないレーンを押したときも、ヒット音とは別の小さな音で「触れた」ことを返す
+      playEmptySound();
+      return;
+    }
+    this.hitNote(hit.note, hit.judge, nowMs);
+  }
+
+  /** フリック入力: フリックノーツ優先、無ければ通常のタップノーツを取る（findFlickHit） */
+  private flickLane(lane: number, rippleX?: number, rippleY?: number): void {
+    if (audioContext().state !== 'running' || this.audioFrozen) unlockAudio();
+    this.laneTapFx(lane, rippleX, rippleY);
+    const nowMs = (nowSeconds() - this.startAt) * 1000;
+    const hit = findFlickHit(this.notes, lane, nowMs);
+    if (!hit) {
       playEmptySound();
       return;
     }
@@ -721,8 +890,16 @@ export class Game {
     // コンボ tier で演出とヒット音が派手になる
     const tier = comboTier(this.combo);
     this.showJudge(judge, tier);
-    this.burst(lane, judge === 'perfect' ? 0 : judge === 'great' ? 1 : 2, tier);
-    playHitSound(judge, tier);
+    const level: 0 | 1 | 2 = judge === 'perfect' ? 0 : judge === 'great' ? 1 : 2;
+    this.burst(lane, level, tier);
+    if (note.flick) {
+      // フリックノーツは専用の音と演出にする（通常ノーツをフリックで叩いた
+      // 場合は note.flick が false なので、従来のタップ音・演出のまま）
+      playFlickSound(judge, tier);
+      this.flickBurst(lane, level, tier);
+    } else {
+      playHitSound(judge, tier);
+    }
     vibrateHit(judge);
     this.syncCombo();
     if (isComboShow(this.combo)) this.triggerComboShow(this.combo);
@@ -734,8 +911,11 @@ export class Game {
       startHoldSound(note, tier, note.timeMs + note.holdMs - nowMs, progress, this.entry?.data.bpm ?? 120);
     } else {
       this.counts[judge]++;
+      this.life = applyLifeDelta(this.life, judge);
     }
     setData('score', this.score);
+    // ライフが尽きたらゲームオーバー
+    this.checkGameOver();
   }
 
   /**
@@ -751,7 +931,7 @@ export class Game {
       this.flash[n.lane] = 1;
       this.ripples.push({
         x: n.lane * lw + lw / 2,
-        y: this.height * HIT_Y_RATIO,
+        y: this.hitY(),
         age: 0,
         life: RIPPLE_LIFE,
         c: LANE_COLORS[n.lane],
@@ -854,7 +1034,7 @@ export class Game {
     const fx = tierFx(tier);
     const lw = this.width / 4;
     const cx = lane * lw + lw / 2;
-    const cy = this.height * HIT_Y_RATIO;
+    const cy = this.hitY();
     const c = LANE_COLORS[lane];
     this.pops.push({ lane, age: 0, life: POP_LIFE, c, maxScale: 1.5 * fx.popMul });
     this.rings.push({
@@ -873,6 +1053,30 @@ export class Game {
       const sp = (140 + Math.random() * (level === 0 ? 380 : 260)) * (0.9 + 0.1 * tier);
       this.spawnParticle(cx, cy, Math.cos(an) * sp, Math.sin(an) * sp - 70, 0.35 + Math.random() * 0.2, c, fx.particleSize);
     }
+  }
+
+  /**
+   * フリック成功時だけの追加演出（burst の残像・輪・粒子に重ねる）:
+   * 上方向へ噴き上がる粒子と、上へ飛んで消えるシェブロン（∧）。
+   * 粒子は初速を上向きに揃えるので、全方向に弾ける通常 burst と動きで区別できる
+   * （粒子の更新側の重力で、噴き上がってから落ちてくる放物線になる）。
+   * 色はレーン色を主に、白を混ぜて「抜けた」明るさを出す。
+   */
+  private flickBurst(lane: number, level: 0 | 1 | 2, tier: number): void {
+    const fx = tierFx(tier);
+    const lw = this.width / 4;
+    const cx = lane * lw + lw / 2;
+    const cy = this.hitY();
+    const c = LANE_COLORS[lane];
+    const n = Math.round((level === 0 ? 14 : level === 1 ? 10 : 7) * fx.particleMul);
+    for (let i = 0; i < n; i++) {
+      const vx = (Math.random() - 0.5) * 130;
+      const vy = -(260 + Math.random() * 260) * (0.9 + 0.1 * tier);
+      const color = i % 3 === 0 ? '#ffffff' : c;
+      this.spawnParticle(cx, cy, vx, vy, 0.4 + Math.random() * 0.2, color, fx.particleSize);
+    }
+    this.flickChevs.push({ x: cx, y: cy, age: 0, life: FLICK_CHEV_LIFE });
+    if (this.flickChevs.length > 12) this.flickChevs.shift();
   }
 
   /**
@@ -907,7 +1111,7 @@ export class Game {
   }
 
 
-  private finish(): void {
+  private finish(failed = false): void {
     this.playing = false;
     cancelAnimationFrame(this.raf);
     stopCurrent();
@@ -923,7 +1127,114 @@ export class Game {
       accuracy: acc,
       rank: rankFor(acc),
       autoplay: this.autoplay,
+      failed,
     });
+  }
+
+  /**
+   * ゲームオーバーの発動チェック（案1：ライフ制。オーナー指示 2026-11-22 で
+   * 累計精度方式から作り替え）。ライフが 0 になったらその場で演奏を終了する。
+   * 判定が更新される経路（ヒット・ミス掃除・長押しの成否）の直後から呼び、
+   * 発動して終了させたときだけ true を返す
+   * （ループ内から呼ばれた場合は、そのフレームの残りを打ち切るために使う）。
+   * オートプレイでは発動しない。中断中は判定が動かないので対象にしない。
+   */
+  private checkGameOver(): boolean {
+    if (this.autoplay || this.paused || !this.playing) return false;
+    if (!isLifeGameOver(this.life)) return false;
+    this.finish(true);
+    return true;
+  }
+
+  /**
+   * ライフメーター（演奏画面の上部に常時表示）。沿革：v1.4.4 で精度ベースの
+   * ランクメーターとして新設 → v1.4.7 で細いバー＋tick＋% の簡素形 → v1.4.9 で
+   * 上部1行に集約 → v1.4.12 で案1（ライフ制）に作り替え（オーナー指示 2026-11-22）。
+   * 残すのは細いバー1本だけ：fill の長さ = 現在のライフ、色 = ライフの帯
+   * （十分=緑／注意=黄／危険=赤）。危険域では fill を点滅させて危険が読めるようにする。
+   * 精度 % 表示と旧ゲームオーバーライン（50% tick）は廃止（精度とランクは結果画面のみ）。
+   * バーは中断ボタンの右から、右端のスコアの手前までに引く（スコアの幅は実測する）。
+   */
+  private drawLifeMeter(g: CanvasRenderingContext2D, W: number): void {
+    const M = LIFE_METER;
+    // バーの右端は、右端のスコアに重ならない位置まで。
+    // スコアは右端 (W - edgeGap) に右寄せで出るので、その実測幅の分を空ける
+    g.font = SCORE_FONT;
+    const scoreW = g.measureText(String(this.score).padStart(7, '0')).width;
+    const barRight = W - M.edgeGap - scoreW - M.scoreGap;
+    const mx = M.meterX;
+    const mw = Math.max(0, barRight - mx);
+    const zone = lifeZone(this.life);
+    // バー: 暗いトラックの上に、現在のライフまでの fill を帯の色で引く
+    g.beginPath();
+    g.roundRect(mx, M.meterY, mw, M.meterH, M.meterH / 2);
+    g.fillStyle = '#2a2f3a';
+    g.fill();
+    if (this.life > 0) {
+      g.save();
+      g.beginPath();
+      g.roundRect(mx, M.meterY, mw, M.meterH, M.meterH / 2);
+      g.clip();
+      // 危険域は点滅させて「やばい」が読めるようにする（約0.35秒周期で明滅）
+      if (zone === 'danger') g.globalAlpha = 0.55 + 0.45 * Math.sin(performance.now() / 110);
+      g.fillStyle = LIFE_COLORS[zone];
+      g.fillRect(mx, M.meterY, (mw * this.life) / LIFE_MAX, M.meterH);
+      g.restore();
+    }
+  }
+
+  /**
+   * オーディオビジュアライザー: 判定枠の下の空き領域に、再生中の曲の周波数を
+   * バーで描く（周波数バー固定）。データは audio.ts の曲専用アナライザから取る
+   * （効果音は混ざらない）。取得は2フレームに1回（約30Hz）に間引く。
+   * アナライザが無い（音声が未生成の）ときは何も描かない。曲が始まる前
+   * （READY 中）は無音データで静かな形になる。
+   * 領域は 390×844 基準で x 58..332（中央寄せ）、y 702..838。v1.4.21 の領域
+   * （x 12..378、y 652..834）を幅・高さとも約 3/4 に縮小し、少し下げたもの
+   * （オーナー調整指示 2026-11-23）。
+   */
+  private drawVisualizer(g: CanvasRenderingContext2D, W: number, H: number): void {
+    const analyser = musicAnalyser();
+    if (!analyser) return;
+    const x0 = (W * 58) / 390;
+    const x1 = (W * 332) / 390;
+    const y1 = H - (H * 6) / 844;
+    const y0 = y1 - (H * 136) / 844;
+    const bandH = y1 - y0;
+    if (bandH < 40 || x1 - x0 < 80) return;
+
+    if (!this.vizFreq || this.vizFreq.length !== analyser.frequencyBinCount) {
+      this.vizFreq = new Uint8Array(analyser.frequencyBinCount);
+    }
+    const freq = this.vizFreq;
+    if (!freq) return;
+    this.vizFrame++;
+    if (this.vizFrame % 2 === 1) {
+      analyser.getByteFrequencyData(freq);
+    }
+    const sampleRate = analyser.context.sampleRate;
+
+
+    // 周波数バー: 下端から伸びる。下→上のグラデーション＋上端のキャップ
+    const vals = groupFreqBins(freq, VISUALIZER_FREQ_BARS, sampleRate);
+    const slot = (x1 - x0) / vals.length;
+    const bw = slot * 0.62;
+    const grad = g.createLinearGradient(0, y1, 0, y0);
+    grad.addColorStop(0, VIZ_BAR_BOTTOM);
+    grad.addColorStop(1, VIZ_BAR_TOP);
+    for (let i = 0; i < vals.length; i++) {
+      const h = Math.max(2, vals[i] * bandH * 0.92);
+      const x = x0 + i * slot + (slot - bw) / 2;
+      g.globalAlpha = VIZ_BAR_ALPHA;
+      g.fillStyle = grad;
+      g.fillRect(x, y1 - h, bw, h);
+      g.globalAlpha = VIZ_BAR_CAP_ALPHA;
+      g.fillStyle = VIZ_BAR_TOP;
+      g.beginPath();
+      g.roundRect(x, y1 - h, bw, 4, 2);
+      g.fill();
+    }
+    g.globalAlpha = 1;
   }
 
   private fit(): void {
@@ -1004,7 +1315,8 @@ export class Game {
     if (tier > this.lastTier) this.tierFlash = 1;
     this.lastTier = tier;
     this.tierFlash = Math.max(0, this.tierFlash - dt * 1.6);
-    const fall = DIFFICULTIES[this.difficulty].fallSeconds;
+    // 実効の落下時間は、難易度の基準値にプレイヤー設定の速度倍率を重ねたもの
+    const fall = effectiveFallSeconds(DIFFICULTIES[this.difficulty].fallSeconds, this.speed);
 
     // 歌詞の現在行が変わったら通知する（表示は main.ts 側の DOM）
     const li = lyricIndexAt(this.entry?.lyrics ?? [], nowMs);
@@ -1020,9 +1332,14 @@ export class Game {
     const missed = isPaused ? 0 : sweepMisses(this.notes, nowMs);
     if (missed > 0) {
       this.counts.miss += missed;
+      this.life = applyLifeDelta(this.life, 'miss', missed);
       this.combo = 0; // コンボが切れたら tier も 0 に戻り、演出は素に戻る
       this.showJudge('miss');
       this.syncCombo();
+      // ミス音はこの掃除で1回だけ（複数ノーツ同時ミスでも重ねない。連続フレームの抑制は playMissSound 側）
+      playMissSound();
+      // ライフが尽きたら、そのフレームでゲームオーバーにして打ち切る
+      if (this.checkGameOver()) return;
     }
 
     // 長押しの進行: tick スコア（拍ごと。音はヒット音の連打が担当し、tick 自体は鳴らさない）、
@@ -1037,6 +1354,7 @@ export class Game {
       }
       if (ev.completed && n.headJudge) {
         this.counts[n.headJudge]++;
+        this.life = applyLifeDelta(this.life, n.headJudge);
         this.score += HOLD_COMPLETE_BONUS[n.headJudge];
         this.holdsCompleted++;
         setData('holdsCompleted', this.holdsCompleted);
@@ -1052,15 +1370,20 @@ export class Game {
       }
       if (ev.failed) {
         this.counts.miss++;
+        this.life = applyLifeDelta(this.life, 'miss');
         this.combo = 0;
         this.showJudge('miss');
         this.syncCombo();
         this.holdsFailed++;
         setData('holdsFailed', this.holdsFailed);
         stopHoldSound(n);
+        // MISS の合図としてミス音も鳴らす（失敗音と役割が違うので両方鳴る）
+        playMissSound();
         playFailSound();
       }
     }
+    // 長押しの成否でライフが動いた直後にも、ゲームオーバーのチェックをする
+    if (this.checkGameOver()) return;
 
     g.fillStyle = '#0e1018';
     g.fillRect(0, 0, W, H);
@@ -1106,6 +1429,9 @@ export class Game {
         g.fillRect(0, 0, W, H);
       }
     }
+    // ビジュアライザー（判定枠の下の空き領域。ノーツ専用キャンバスより下に描くので、
+    // 下まで落ちてくるノーツが模様の手前に重なる）
+    this.drawVisualizer(g, W, H);
     // 画面の縁の光（FEVER の枠の光に代わるコンボ演出）: 段位が上がるほど
     // 強く・太くなる。上がった瞬間は tierFlash でひときわ光り、ミスで消える
     const edge = TIER_EDGE[tier];
@@ -1209,10 +1535,47 @@ export class Game {
     for (const n of this.notes) {
       if (n.state !== 0 || n.holdMs > 0) continue;
       const y = hy - ((n.timeMs - nowMs) / 1000 / fall) * hy;
-      if (y < -30 || y > H + 30) continue;
+      // フリック矢印は高さ 60px を脈動させるため、通常ノーツより広い余白で間引く
+      if (n.flick ? y < -80 || y > H + 80 : y < -30 || y > H + 30) continue;
+      if (n.flick) {
+        // フリックの印は大きなブロック矢印（↑）だけ（オーナー決定 2026-11-23、確定仕様）。
+        // 四角いノーツ本体は描かず、矢印を従来ノーツの中心位置に置く。
+        // 塗りはそのレーンの色、縁取りは濃紺。矢印の中心を支点に脈動させる
+        const cx = n.lane * lw + lw / 2;
+        const pulse =
+          1 +
+          (FLICK_ARROW_PULSE_MAX - 1) *
+            (0.5 + 0.5 * Math.sin((frameAt / FLICK_ARROW_PULSE_PERIOD_SEC) * Math.PI * 2));
+        const ah = FLICK_ARROW_HEIGHT;
+        const aw = lw - 10;
+        gn.save();
+        gn.translate(cx, y);
+        gn.scale(pulse, pulse);
+        gn.beginPath();
+        gn.moveTo(0, -ah / 2);
+        gn.lineTo(aw / 2, ah * 0.05);
+        gn.lineTo(aw * 0.22, ah * 0.05);
+        gn.lineTo(aw * 0.22, ah / 2);
+        gn.lineTo(-aw * 0.22, ah / 2);
+        gn.lineTo(-aw * 0.22, ah * 0.05);
+        gn.lineTo(-aw / 2, ah * 0.05);
+        gn.closePath();
+        gn.fillStyle = LANE_COLORS[n.lane];
+        gn.fill();
+        gn.strokeStyle = FLICK_ARROW_OUTLINE_COLOR;
+        // 縁取りの太さが脈動で拡縮されないよう、拡大率で割って画面上 5px 一定にする
+        gn.lineWidth = FLICK_ARROW_OUTLINE_WIDTH / pulse;
+        gn.lineJoin = 'round';
+        gn.stroke();
+        gn.restore();
+        continue;
+      }
+      const nx = n.lane * lw + 8;
+      const nw = lw - 16;
+      const nh = 28;
       gn.fillStyle = LANE_COLORS[n.lane];
       gn.beginPath();
-      gn.roundRect(n.lane * lw + 8, y - 14, lw - 16, 28, 8);
+      gn.roundRect(nx, y - nh / 2, nw, nh, 8);
       gn.fill();
     }
 
@@ -1281,6 +1644,27 @@ export class Game {
     this.ripples = this.ripples.filter((r) => r.age < r.life);
     gn.globalAlpha = 1;
 
+    // フリック成功時に飛ぶシェブロン: その場から上へ進みながら少し広がり、消える
+    for (const f of this.flickChevs) {
+      f.age += dt;
+      const k = f.age / f.life;
+      if (k >= 1) continue;
+      const rise = FLICK_CHEV_RISE_PX * (1 - (1 - k) * (1 - k));
+      const s = 11 + 3 * k;
+      gn.globalAlpha = 0.95 * (1 - k);
+      // 成功シェブロンの色は水色のまま維持（見た目改善の案A、2026-11-23。演出自体は従来どおり）
+      gn.strokeStyle = FLICK_CHEVRON_COLOR;
+      gn.lineWidth = 4;
+      gn.lineJoin = 'round';
+      gn.beginPath();
+      gn.moveTo(f.x - s, f.y - rise + s * 0.55);
+      gn.lineTo(f.x, f.y - rise - s * 0.55);
+      gn.lineTo(f.x + s, f.y - rise + s * 0.55);
+      gn.stroke();
+    }
+    this.flickChevs = this.flickChevs.filter((f) => f.age < f.life);
+    gn.globalAlpha = 1;
+
     g.textAlign = 'center';
     if (nowSec < 0) {
       g.fillStyle = '#fff';
@@ -1340,23 +1724,24 @@ export class Game {
       g.globalAlpha = 1;
     }
     g.textAlign = 'left';
-    // 中断ボタン: × ではなく「❚❚ 中断」と分かる見た目にする（オーナー指示 2026-11-21）
+    // 中断ボタン: 丸ボタンに ❚❚ アイコンだけ（v1.4.9 の上部 UI 見直しで文字は消した）
     g.fillStyle = 'rgba(6,8,16,.45)';
     g.beginPath();
-    g.roundRect(PAUSE_BTN.x, PAUSE_BTN.y, PAUSE_BTN.w, PAUSE_BTN.h, 19);
+    g.arc(PAUSE_BTN.cx, PAUSE_BTN.cy, PAUSE_BTN.r, 0, Math.PI * 2);
     g.fill();
     g.fillStyle = '#fff';
-    g.fillRect(PAUSE_BTN.x + 15, PAUSE_BTN.y + 10, 5, 18);
-    g.fillRect(PAUSE_BTN.x + 24, PAUSE_BTN.y + 10, 5, 18);
-    g.font = 'bold 15px sans-serif';
-    g.fillText('中断', PAUSE_BTN.x + 40, PAUSE_BTN.y + 25);
-    g.font = 'bold 21px sans-serif';
+    g.fillRect(PAUSE_BTN.cx - 7, PAUSE_BTN.cy - 8, 5, 16);
+    g.fillRect(PAUSE_BTN.cx + 2, PAUSE_BTN.cy - 8, 5, 16);
+    g.font = SCORE_FONT;
     g.textAlign = 'right';
-    g.fillText(String(this.score).padStart(7, '0'), W - 14, 36);
+    g.fillText(String(this.score).padStart(7, '0'), W - 14, SCORE_BASELINE_Y);
+    // 曲の進行バー（最上端 3px）。経過分の色は金から白に変えた
+    // （金色のランクメーターと並ぶと紛らわしいため、v1.4.9 の見直し）
     g.fillStyle = 'rgba(255,255,255,.2)';
     g.fillRect(0, 0, W, 3);
-    g.fillStyle = GOLD;
+    g.fillStyle = '#fff';
     g.fillRect(0, 0, W * Math.max(0, Math.min(1, nowSec / this.durationSec)), 3);
+    this.drawLifeMeter(g, W);
 
     if ((nowMs > this.durationSec * 1000 + 500 && this.notes.every((n) => n.state !== 0)) || nowMs > this.durationSec * 1000 + 2000) {
       this.finish();
