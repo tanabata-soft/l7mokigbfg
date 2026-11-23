@@ -862,6 +862,14 @@
   border-color: rgb(255 143 143 / 0.45);
 }
 
+/* ボタンが3つに増えた（v1.4.13「はじめからやりなおす」追加）ため、中断カードでは
+   1行目に「つづける／はじめからやりなおす」、2行目に「メニューに戻る」を回す。
+   横1列だとスマホ幅で文言がはみ出すための措置 */
+#view-game .pause .opt {
+  flex: 1 1 40%;
+  font-size: 0.92rem;
+}
+
 /* 結果は別画面にせず、終わった演奏画面の上に重ねて出す（オーナー指示 2026-11-20）。
    カードの後ろは大きな影で全面を薄暗くし、演奏画面が透けて見える */#view-game .result {
   position: absolute;
@@ -885,6 +893,15 @@
   margin: 12px 0 4px;
 }
 
+/* ゲームオーバー（ライフが尽きた失敗）の印。ランク文字の上に赤く大きく出す */
+#view-game .result .gameover-badge {
+  margin: 10px 0 0;
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  color: #ff5252;
+}
+
 #view-game .result p {
   margin: 6px 0;
 }
@@ -901,6 +918,20 @@
   font-weight: 800;
   letter-spacing: 0.12em;
   box-shadow: 0 0 18px rgb(255 209 102 / 0.45);
+}
+
+/* ハイスコア更新の印。フルコンボ（金）と並んでも見分けられるよう、色はアクセント（水色）で形は同じピルにする */
+#view-game .result .newrecord-badge {
+  display: inline-block;
+  margin: 2px 0 6px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #06222e;
+  font-size: 0.9rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  box-shadow: 0 0 18px rgb(57 208 255 / 0.45);
 }
 
 /* オートプレイで演奏した回の印（ベストスコアに残らないことを見せる） */#view-game .result .autoplay-badge {
@@ -1008,20 +1039,6 @@
 
 #view-game .latency-result-text {
   margin: 6px 0 10px;
-}
-
-#view-game .latency-apply {
-  width: 100%;
-  min-height: 48px;
-}
-
-#view-game .latency-actions {
-  justify-content: center;
-  margin-top: 12px;
-}
-
-#view-game .latency-actions .opt {
-  flex: 1;
 }
 
 /* ---------- CD 側へ同居させるための調整（エンジン側） ---------- */

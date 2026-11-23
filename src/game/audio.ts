@@ -83,6 +83,44 @@ export function audioOutput(): AudioNode {
   return master;
 }
 
+// ---- 曲専用の合流点（ビジュアライザー用のアナライザを挟む） ----
+// 曲は ゲイン（×1、そのまま通過）→ AnalyserNode（通過）→ マスター の順に流す。
+// どちらも音量・タイミングを変えないので、効果音やジングル（マスター直結）には
+// 影響せず、解析対象は曲だけになる。AudioContext が作り直されたら（世代が
+// 変わったら）ノードも作り直す（sound.ts のヒット音バスと同じ流儀）。
+let musicTap: { input: GainNode; analyser: AnalyserNode } | undefined;
+let musicTapGeneration = -1;
+
+function ensureMusicTap(): { input: GainNode; analyser: AnalyserNode } {
+  const ac = audioContext();
+  if (!musicTap || musicTapGeneration !== audioGeneration()) {
+    musicTapGeneration = audioGeneration();
+    const input = ac.createGain();
+    input.gain.value = 1;
+    const analyser = ac.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.8;
+    input.connect(analyser);
+    analyser.connect(audioOutput());
+    musicTap = { input, analyser };
+  }
+  return musicTap;
+}
+
+/** 曲の再生先（曲専用の合流点の入口）。曲はここへつなぐ */
+export function musicInput(): AudioNode {
+  return ensureMusicTap().input;
+}
+
+/**
+ * ビジュアライザー用: 曲のアナライザ。AudioContext がまだ無い、または作り直しで
+ * 世代が変わっているときは undefined（呼び出し側は「データなし」として扱う）
+ */
+export function musicAnalyser(): AnalyserNode | undefined {
+  if (!ctx || !musicTap || musicTapGeneration !== audioGeneration()) return undefined;
+  return musicTap.analyser;
+}
+
 export function nowSeconds(): number {
   return audioContext().currentTime;
 }
@@ -184,7 +222,8 @@ export function playBuffer(buf: AudioBuffer, when: number, offsetSec = 0): Audio
   stopCurrent();
   const src = audioContext().createBufferSource();
   src.buffer = buf;
-  src.connect(audioOutput());
+  // 曲だけは専用の合流点（アナライザ経由）を通す。音量・タイミングは変わらない
+  src.connect(musicInput());
   src.start(when, Math.max(0, offsetSec));
   current = src;
   return src;

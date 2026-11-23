@@ -1,6 +1,10 @@
 // 効果音は Web Audio で合成するのが基本。オン/オフ設定は必ず用意する。
-// 例外は音声ファイル2種だけ: ヒット音のサンプル音源と、フルコンボ演出の
-// ボイス（どちらも任意の素材スロット。src/presentation.ts と下記参照）。
+// 例外は音声ファイルだけ: ヒット音のサンプル音源と、フルコンボ演出の
+// ボイス（どちらも任意の素材スロット。src/presentation.ts と下記参照）と、
+// 結果画面の達成ボイス2種（テンプレート標準素材として同梱。下記の節を参照）。
+// フリック音・ミス音・ゲームオーバー音・結果発表ジングルは合成で作る
+// （曲・作品に依存する音声ファイルは持ち込まない。フリック音は
+// NK-S006 の初期実装＝v1.4.3 の合成方式「シャキーン」を土台にした。下記の節を参照）。
 // 音は、曲の再生と同じ AudioContext（src/audio.ts）を使う。
 //
 // ヒット音は「サンプル音源方式」: src/assets/hit-sample.wav（テンプレート付属の
@@ -25,6 +29,8 @@ import { audioContext, audioGeneration, audioOutput, loadBuffer } from './audio'
 import { load, save } from './storage';
 import { hitPitchMultiplier, type Judge, type Rank } from './logic';
 import hitSampleUrl from './assets/hit-sample.wav';
+import voiceFullComboUrl from './assets/voice-fullcombo.mp3';
+import voiceNewRecordUrl from './assets/voice-newrecord.mp3';
 
 export type HitJudge = Exclude<Judge, 'miss'>;
 
@@ -577,6 +583,106 @@ export function playResultJingle(rank: Rank): number {
   }
 }
 
+/**
+ * ゲームオーバー音（ライフが尽きて失敗したときに、ジングルの代わりに鳴らす）。
+ * テンプレートではアプリ内合成（下降4音）で作る。NK-S006 ではオーナー提供の
+ * 音源ファイルに差し替えたが、素材そのものは作品側の判断で、仕組み
+ * （鳴らし始めてから GAME_OVER_WAIT_MS だけ待って失敗の結果カードを出す）は
+ * ここを標準とする。効果音オフのときは鳴らさず 0 を返す（結果は即表示）。
+ */
+
+/** ゲームオーバー音を鳴らしてから結果カードを出すまでの長さ (ms) */
+export const GAME_OVER_WAIT_MS = 1500;
+
+/** ゲームオーバー音の譜面（短調の下行4音。最後の音だけ長く残す） */
+export const GAME_OVER_NOTES: JingleNote[] = [
+  { atSec: 0, freq: 329.63, durSec: 0.22, peak: 0.16 },
+  { atSec: 0.19, freq: 261.63, durSec: 0.22, peak: 0.16 },
+  { atSec: 0.38, freq: 220.0, durSec: 0.22, peak: 0.16 },
+  { atSec: 0.57, freq: 164.81, durSec: 0.8, peak: 0.18 },
+];
+
+/**
+ * ゲームオーバー音を鳴らし始めて、結果カードを出すまでの長さ（ms）を返す。
+ * 効果音オフ・再生失敗のときは鳴らさず 0 を返す（結果は即表示）。
+ */
+export function playGameOverSound(): number {
+  if (!enabled) return 0;
+  try {
+    const ac = audioContext();
+    void ac.resume();
+    const startAt = ac.currentTime + 0.02;
+    for (const note of GAME_OVER_NOTES) playJingleNote(note, startAt, hitBus());
+    document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'gameover' } }));
+    return GAME_OVER_WAIT_MS;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 結果画面の達成ボイス（NK-S006 試作で追加し、テンプレート v1.8.0 で標準化）。
+ * 「フルコンボ！」と「ハイスコア更新！」の2フレーズで、素材は Gemini TTS
+ * （gemini-3.8-flash-tts、声 Leda）で生成した音声を MP3 192kbps 化し、
+ * ジングルと同水準（約 −13 LUFS）にそろえた src/game/assets/voice-*.mp3 を
+ * テンプレートの標準素材として同梱する（汎用フレーズなので作品ごとに
+ * 差し替える必要はない。差し替える場合は同名ファイルを置き換える）。
+ * ビルドで dist に出力され Service Worker の precache に入り、演奏開始時に
+ * 先読みする。
+ *
+ * 鳴らすタイミング: 結果カードが出る瞬間（ジングルの頭の部分はカード表示の
+ * 待ち時間で鳴り終わっている）。両方達成したときは、フルコンボ→
+ * ハイスコア更新の順に、前のフレーズが終わってから次を続けて鳴らす。
+ * 効果音のオン/オフ設定に従う（隣で鳴るジングルと同じ扱い。オフなら無音で、
+ * 結果カードの印だけが出る）。ゲームオーバーの結果では鳴らさない。
+ */
+
+/** 結果ボイスの種類（結果カードの印と対応する） */
+export type ResultVoice = 'fullcombo' | 'newrecord';
+
+const RESULT_VOICE_URLS: Record<ResultVoice, string> = {
+  fullcombo: voiceFullComboUrl,
+  newrecord: voiceNewRecordUrl,
+};
+
+/** 続けて鳴らすときの、フレーズ間の間（秒） */
+const RESULT_VOICE_GAP_SEC = 0.15;
+
+/** 演奏開始のときに結果ボイス素材を先読みしておく（結果表示で読み込み待ちにならないように） */
+export function preloadResultVoices(): void {
+  for (const url of Object.values(RESULT_VOICE_URLS)) {
+    void loadBuffer(url).catch(() => undefined);
+  }
+}
+
+/**
+ * 結果ボイスを、渡された順に続けて鳴らす。効果音オフのときは何もしない。
+ * 素材の読み込み・デコードに失敗しても、結果表示の流れは止めない。
+ * 鳴らし始めは app:sound（kind: 'voice-fullcombo' / 'voice-newrecord'）でも出す。
+ */
+export function playResultVoices(voices: ResultVoice[]): void {
+  if (!enabled || voices.length === 0) return;
+  try {
+    const ac = audioContext();
+    void ac.resume();
+    void (async () => {
+      let at = ac.currentTime;
+      for (const voice of voices) {
+        const buf = await loadBuffer(RESULT_VOICE_URLS[voice]).catch(() => undefined);
+        if (!buf) continue;
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(hitBus());
+        src.start(Math.max(at, ac.currentTime));
+        document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: `voice-${voice}` } }));
+        at = Math.max(at, ac.currentTime) + buf.duration + RESULT_VOICE_GAP_SEC;
+      }
+    })();
+  } catch {
+    // 音が出せなくても続行する
+  }
+}
+
 /** 選択を変えたときの確認音（曲・難易度・設定の切替など）。空タップ音より少し高く、短く小さく鳴らす */
 export const UI_CLICK: BlipToneParams = {
   freq1: 1568,
@@ -630,6 +736,205 @@ export function playSwipeSound(): void {
     noise.start(t);
     noise.stop(t + dur + 0.02);
     document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'swipe' } }));
+  } catch {
+    // 音が出せなくても続行する
+  }
+}
+
+
+/**
+ * フリックノーツ専用のヒット音は、アプリ内合成で作る（音声ファイルは使わない）。
+ * NK-S006 では最終的にオーナー選定の H2 サンプル音源（flick-sample.wav）へ
+ * 差し替えたが、その素材は NK-S006 の曲・試聴経緯に紐づくものなので、
+ * テンプレートには持ち込まない。代わりに、NK-S006 の初期実装にあった合成方式
+ * （v1.4.3「シャキーン」B案）を土台にする: 擦過音（ノイズのバンドパス上掃引）が
+ * 下から上へ抜けていき、金属の響き（基本音＋1.5倍＋2倍の倍音が指数減衰する）が
+ * 残る、という質感。どの作品の曲にも依存せず、合成なので tier のピッチ変化も
+ * そのまま付けられる。
+ * 判定別: PERFECT は掃引が最も広く・長く、響きも長い。GREAT は中間、
+ * GOOD は掃引が狭く短く、響きも短く鈍い。音量はヒット音サンプルの
+ * peak 0.5/0.42/0.32 より控えめにする。
+ */
+export interface FlickToneParams {
+  /** 擦過音の掃引の開始周波数 (Hz)。tier のピッチ補正はここにかかる */
+  sweepFromHz: number;
+  /** 擦過音の掃引の終了周波数 (Hz) */
+  sweepToHz: number;
+  /** 擦過音の長さ (秒) */
+  sweepSec: number;
+  /** 擦過音の音量 */
+  peak: number;
+  /** 金属の響きの基本周波数 (Hz)。倍音は FLICK_RING_PARTIALS の比率で重ねる */
+  ringHz: number;
+  /** 金属の響きの減衰時定数 (秒)。大きいほど響きが長く残る */
+  ringTauSec: number;
+  /** 金属の響きの基本倍音の音量 */
+  ringPeak: number;
+}
+
+export const FLICK_TONE: Record<HitJudge, FlickToneParams> = {
+  perfect: { sweepFromHz: 700, sweepToHz: 6500, sweepSec: 0.22, peak: 0.2, ringHz: 2093, ringTauSec: 0.09, ringPeak: 0.11 },
+  great: { sweepFromHz: 700, sweepToHz: 5600, sweepSec: 0.18, peak: 0.16, ringHz: 2093, ringTauSec: 0.07, ringPeak: 0.09 },
+  good: { sweepFromHz: 650, sweepToHz: 4200, sweepSec: 0.13, peak: 0.11, ringHz: 2093, ringTauSec: 0.045, ringPeak: 0.06 },
+};
+
+/** 金属の響きの倍音構成（基本音に対する周波数比と音量比）。金属棒を打ったような非整数次を含む並び */
+export const FLICK_RING_PARTIALS: readonly { ratio: number; amp: number }[] = [
+  { ratio: 1, amp: 1 },
+  { ratio: 1.5, amp: 0.71 },
+  { ratio: 2, amp: 0.48 },
+];
+
+/**
+ * 判定と tier から、フリック音のパラメータを決める。tier ではピッチが
+ * +1 半音/tier（上限 +4）上がる（合成ヒット音のフォールバックと同じ規則で、
+ * logic.ts の hitPitchMultiplier を使う。合成音なのでピッチを変えても音色が壊れない）。
+ */
+export function flickToneFor(judge: HitJudge, tier: number): FlickToneParams {
+  const base = FLICK_TONE[judge];
+  const mul = hitPitchMultiplier(tier);
+  return {
+    ...base,
+    sweepFromHz: base.sweepFromHz * mul,
+    sweepToHz: base.sweepToHz * mul,
+    ringHz: base.ringHz * mul,
+  };
+}
+
+/**
+ * フリック音の金属の響きを鳴らす。各倍音を正弦波で、指数減衰
+ * （setTargetAtTime の時定数 = ringTauSec）で重ねる。
+ */
+function playFlickRing(baseHz: number, at: number, tauSec: number, peak: number, out: AudioNode): void {
+  const ac = audioContext();
+  const stopAt = at + tauSec * 8 + 0.05;
+  for (const { ratio, amp } of FLICK_RING_PARTIALS) {
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.value = baseHz * ratio;
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(peak * amp, at);
+    gain.gain.setTargetAtTime(0, at, tauSec);
+    osc.connect(gain).connect(out);
+    osc.start(at);
+    osc.stop(stopAt);
+  }
+}
+
+/**
+ * フリックノーツに当たった瞬間の専用音。通常ヒット音の代わりに鳴らす
+ * （通常ノーツをフリックで叩いたときは従来の playHitSound のまま）。
+ * 鳴らし方は flickToneFor のパラメータどおり: 「シャキーン」=
+ * 擦過音（ノイズのバンドパス上掃引、スワイプ音より帯域を絞って鋭く）が
+ * 下から上へ抜け、金属の響き（playFlickRing）が減衰しながら残る。
+ * 擦過音のノイズは使い回しバッファ（0.05秒）をループさせて掃引の全長に届かせる
+ * （NK-S006 の合成実装はループなしで、実質アタック部分だけが鳴っていた。
+ * テンプレートでは掃引全体が聞こえるよう loop を付ける）。
+ */
+export function playFlickSound(judge: HitJudge, tier = 0): void {
+  if (!enabled) return;
+  try {
+    const ac = audioContext();
+    // iPhone では操作のあとに resume が必要
+    void ac.resume();
+    const tone = flickToneFor(judge, tier);
+    const t = ac.currentTime;
+    const out = hitBus();
+    // 擦過音: ノイズのバンドパス中心を掃引に沿って上へ動かす
+    const noise = ac.createBufferSource();
+    noise.buffer = getNoiseBuffer(ac);
+    noise.loop = true;
+    const band = ac.createBiquadFilter();
+    band.type = 'bandpass';
+    band.Q.value = 2.0;
+    band.frequency.setValueAtTime(tone.sweepFromHz, t);
+    band.frequency.exponentialRampToValueAtTime(tone.sweepToHz, t + tone.sweepSec);
+    const noiseGain = ac.createGain();
+    noiseGain.gain.setValueAtTime(0.0001, t);
+    noiseGain.gain.exponentialRampToValueAtTime(tone.peak, t + tone.sweepSec * 0.25);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, t + tone.sweepSec + 0.03);
+    noise.connect(band).connect(noiseGain).connect(out);
+    noise.start(t);
+    noise.stop(t + tone.sweepSec + 0.05);
+    // 金属の響き: 擦過音と同時に打ち、掃引が抜けたあとも減衰して残る
+    playFlickRing(tone.ringHz, t, tone.ringTauSec, tone.ringPeak, out);
+    // テストが「どの音が鳴ったか」を確認できるようにイベントを出す
+    document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'flick', judge, tier } }));
+  } catch {
+    // 音が出せなくても続行する
+  }
+}
+
+/**
+ * ミス音のパラメータ（v1.4.3 で新設。オーナーが試聴3案から G 案「ポッ」を選択）。
+ * それまで MISS 判定は無音だった。丸く柔らかい短い下降サイン音で、
+ * 音量はヒット音（サンプル peak 0.5/0.42/0.32）より小さく、
+ * 連発しても耳障りにならない控えめな値にする。
+ */
+export interface MissToneParams {
+  /** 下降の開始周波数 (Hz) */
+  fromHz: number;
+  /** 下降の終了周波数 (Hz) */
+  toHz: number;
+  /** 減衰の時定数 (秒) */
+  tauSec: number;
+  /** 立ち上がりの長さ (秒)。短いが、指数ランプで柔らかく立ち上げる */
+  attackSec: number;
+  /** 音量 */
+  peak: number;
+}
+
+export const MISS_TONE: MissToneParams = {
+  fromHz: 320,
+  toHz: 180,
+  tauSec: 0.055,
+  attackSec: 0.012,
+  peak: 0.14,
+};
+
+/** ミス音のパラメータを返す（判定や tier では変えない） */
+export function missToneFor(): MissToneParams {
+  return MISS_TONE;
+}
+
+/** ミス音の最小発音間隔 (ms)。密集地帯でミスが連続したときに重なりすぎないための抑制 */
+export const MISS_MIN_INTERVAL_MS = 60;
+
+/** 前回鳴らした時刻から見て、次に鳴らしてよいか（playMissSound の抑制判定） */
+export function missSoundDue(lastPlayedAtMs: number, nowMs: number): boolean {
+  return nowMs - lastPlayedAtMs >= MISS_MIN_INTERVAL_MS;
+}
+
+let lastMissPlayedAtMs = Number.NEGATIVE_INFINITY;
+
+/**
+ * ノーツを取り逃がした（MISS）瞬間の専用音。鳴らす経路は game.ts の
+ * MISS 確定箇所（ノーツ通過の掃除と長押しの失敗）から呼ばれる。
+ * 短時間にミスが連続する場面では MISS_MIN_INTERVAL_MS 未満の間隔の発音を抑える。
+ */
+export function playMissSound(): void {
+  if (!enabled) return;
+  const nowMs = performance.now();
+  if (!missSoundDue(lastMissPlayedAtMs, nowMs)) return;
+  lastMissPlayedAtMs = nowMs;
+  try {
+    const ac = audioContext();
+    void ac.resume();
+    const tone = missToneFor();
+    const t = ac.currentTime;
+    const osc = ac.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(tone.fromHz, t);
+    osc.frequency.exponentialRampToValueAtTime(tone.toHz, t + tone.tauSec * 2);
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(tone.peak, t + tone.attackSec);
+    gain.gain.setTargetAtTime(0, t + tone.attackSec, tone.tauSec);
+    osc.connect(gain).connect(hitBus());
+    osc.start(t);
+    osc.stop(t + tone.attackSec + tone.tauSec * 8 + 0.05);
+    // テストが「どの音が鳴ったか」を確認できるようにイベントを出す
+    document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'miss' } }));
   } catch {
     // 音が出せなくても続行する
   }
