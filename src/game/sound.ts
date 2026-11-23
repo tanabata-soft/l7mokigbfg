@@ -1,10 +1,11 @@
 // 効果音は Web Audio で合成するのが基本。オン/オフ設定は必ず用意する。
 // 例外は音声ファイルだけ: ヒット音のサンプル音源と、フルコンボ演出の
 // ボイス（どちらも任意の素材スロット。src/presentation.ts と下記参照）と、
-// 結果画面の達成ボイス2種（テンプレート標準素材として同梱。下記の節を参照）。
-// フリック音・ミス音・ゲームオーバー音・結果発表ジングルは合成で作る
-// （曲・作品に依存する音声ファイルは持ち込まない。フリック音は
-// NK-S006 の初期実装＝v1.4.3 の合成方式「シャキーン」を土台にした。下記の節を参照）。
+// 結果発表ジングル（オーナー提供の音源ファイル。2026-11-22 に合成から差し替え）と、
+// フリック音のサンプル音源（オーナーが試聴プレビューから選んだ音源そのもの。
+// 2026-11-22 に合成から差し替え。下記のフリック音の節を参照）と、
+// ゲームオーバー音（オーナー提供の音源ファイル。2026-11-22 に追加）と、
+// 結果画面の達成ボイス（Gemini TTS 生成の音声ファイル。2026-11-22 に追加）。
 // 音は、曲の再生と同じ AudioContext（src/audio.ts）を使う。
 //
 // ヒット音は「サンプル音源方式」: src/assets/hit-sample.wav（テンプレート付属の
@@ -29,6 +30,9 @@ import { audioContext, audioGeneration, audioOutput, loadBuffer } from './audio'
 import { load, save } from './storage';
 import { hitPitchMultiplier, type Judge, type Rank } from './logic';
 import hitSampleUrl from './assets/hit-sample.wav';
+import flickSampleUrl from './assets/flick-sample.wav';
+import resultJingleUrl from './assets/result-jingle.mp3';
+import gameOverUrl from './assets/game-over.mp3';
 import voiceFullComboUrl from './assets/voice-fullcombo.mp3';
 import voiceNewRecordUrl from './assets/voice-newrecord.mp3';
 
@@ -500,82 +504,62 @@ export async function playFullComboVoice(url?: string): Promise<void> {
 }
 
 /**
- * 結果発表ジングル（オーナー指示 2026-11-21、音源は A 案＝アプリ内合成を採用）。
- * 演奏が終わったら、まずこのファンファーレが鳴り、鳴り終わってから結果カードが
- * 出る（出す側の game-main.ts が、返ってきた長さだけ表示を遅らせる）。
- * C メジャーの上行4音（ド・ミ・ソ・ド）→ 終止和音という小さなファンファーレで、
- * S ランクのときだけ和音の前にきらめき（高音2音）を足して少し豪華にする。
+ * 結果発表ジングル（オーナー指示 2026-11-22 で、アプリ内合成からオーナー提供の
+ * 音源ファイルへ差し替え）。素材は cyber_result_sleek_triumph_3sec.wav（3.0秒）を
+ * MP3 192kbps に変換した src/game/assets/result-jingle.mp3 で、ビルドで dist に
+ * 出力され Service Worker の precache に入る（workbox の globPatterns に mp3 あり）。
+ * 旧・合成ファンファーレ（C メジャーの上行4音→終止和音、S ランクはきらめき追加）は
+ * 素材に一本化して削除した（重ね掛けもしない）。
+ *
+ * 結果カードの表示タイミングは差し替え前と変えない: 演奏が終わったらジングルを
+ * 鳴らし始め、resultJingleDurationMs の長さだけ待ってから結果カードが出る
+ * （出す側の game-main.ts が、返ってきた長さだけ表示を遅らせる）。
+ * 素材は 3.0 秒あるので、カードが出たあとも鳴り続ける（結果表示と合わせて鳴る形）。
  * 効果音のオン/オフ設定に従う: オフのときは鳴らさず、長さ 0 を返す（結果は即表示）。
  */
-export interface JingleNote {
-  /** ジングル開始からのオフセット（秒） */
-  atSec: number;
-  /** 周波数 (Hz) */
-  freq: number;
-  /** 音の長さ（秒）。この時間で指数減衰して消える */
-  durSec: number;
-  /** 音量 */
-  peak: number;
-}
 
-/** 結果発表ジングルの譜面を返す。S ランクは和音の前にきらめきが入り、少し長い */
-export function resultJingleNotes(rank: Rank): JingleNote[] {
-  const up: JingleNote[] = [
-    { atSec: 0, freq: 523.25, durSec: 0.13, peak: 0.18 },
-    { atSec: 0.12, freq: 659.25, durSec: 0.13, peak: 0.18 },
-    { atSec: 0.24, freq: 783.99, durSec: 0.13, peak: 0.18 },
-    { atSec: 0.36, freq: 1046.5, durSec: 0.18, peak: 0.2 },
-  ];
-  const sparkle: JingleNote[] =
-    rank === 'S'
-      ? [
-          { atSec: 0.56, freq: 1318.51, durSec: 0.1, peak: 0.13 },
-          { atSec: 0.66, freq: 1567.98, durSec: 0.1, peak: 0.13 },
-        ]
-      : [];
-  const chordAt = rank === 'S' ? 0.78 : 0.56;
-  const chord: JingleNote[] = [523.25, 659.25, 783.99, 1046.5].map((freq) => ({
-    atSec: chordAt,
-    freq,
-    durSec: 0.62,
-    peak: 0.085,
-  }));
-  return [...up, ...sparkle, ...chord];
-}
+/** 結果カードを出すまでの待ち時間（ms）。S ランクだけ少し長い */
+export const RESULT_JINGLE_WAIT_MS: Record<Rank, number> = {
+  S: 1480,
+  A: 1260,
+  B: 1260,
+  C: 1260,
+};
 
-/** ジングルの長さ（ms）。最後の音が消える時刻＋結果表示までの小さな間 */
+/**
+ * ジングルを鳴らしてから結果カードを出すまでの長さ（ms）。
+ * 値は差し替え前の合成ジングルの長さ（最後の音が消える時刻＋80ms）をそのまま
+ * 引き継いだもので、表示タイミングを変えないための定数。S ランクが長いのは、
+ * 旧合成で「きらめき（高音2音）」が入って和音が遅れた名残（待ち時間の差だけ残した）。
+ */
 export function resultJingleDurationMs(rank: Rank): number {
-  const endSec = Math.max(...resultJingleNotes(rank).map((n) => n.atSec + n.durSec));
-  return Math.round(endSec * 1000) + 80;
+  return RESULT_JINGLE_WAIT_MS[rank];
 }
 
-/** ジングルの1音を鳴らす（三角波で、金管っぽく柔らかく） */
-function playJingleNote(note: JingleNote, startAt: number, out: AudioNode): void {
-  const ac = audioContext();
-  const t = startAt + note.atSec;
-  const osc = ac.createOscillator();
-  osc.type = 'triangle';
-  osc.frequency.value = note.freq;
-  const gain = ac.createGain();
-  gain.gain.setValueAtTime(0.0001, t);
-  gain.gain.exponentialRampToValueAtTime(note.peak, t + 0.012);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + note.durSec);
-  osc.connect(gain).connect(out);
-  osc.start(t);
-  osc.stop(t + note.durSec + 0.02);
+/** 演奏開始のときにジングル素材を先読みしておく（結果表示で読み込み待ちにならないように） */
+export function preloadResultJingle(): void {
+  void loadBuffer(resultJingleUrl).catch(() => undefined);
 }
 
 /**
- * 結果発表ジングルを鳴らし、その長さ（ms）を返す。効果音オフ・再生失敗のときは
- * 鳴らさず 0 を返す（呼び出し側は 0 なら結果を即表示する）。
+ * 結果発表ジングル（素材ファイル）を鳴らし始めて、結果カードを出すまでの
+ * 長さ（ms）を返す。効果音オフのときは鳴らさず 0 を返す（結果は即表示）。
+ * 再生は効果音の出口（hitBus）経由で、曲の再生管理には触らない。
+ * 素材の読み込み・デコードに失敗しても、表示の流れは止めない（待ち時間は返す）。
  */
 export function playResultJingle(rank: Rank): number {
   if (!enabled) return 0;
   try {
     const ac = audioContext();
     void ac.resume();
-    const startAt = ac.currentTime + 0.02;
-    for (const note of resultJingleNotes(rank)) playJingleNote(note, startAt, hitBus());
+    void loadBuffer(resultJingleUrl)
+      .then((buf) => {
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(hitBus());
+        src.start();
+      })
+      .catch(() => undefined);
     document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'jingle', rank } }));
     return resultJingleDurationMs(rank);
   } catch {
@@ -584,35 +568,43 @@ export function playResultJingle(rank: Rank): number {
 }
 
 /**
- * ゲームオーバー音（ライフが尽きて失敗したときに、ジングルの代わりに鳴らす）。
- * テンプレートではアプリ内合成（下降4音）で作る。NK-S006 ではオーナー提供の
- * 音源ファイルに差し替えたが、素材そのものは作品側の判断で、仕組み
- * （鳴らし始めてから GAME_OVER_WAIT_MS だけ待って失敗の結果カードを出す）は
- * ここを標準とする。効果音オフのときは鳴らさず 0 を返す（結果は即表示）。
+ * ゲームオーバー音（オーナー提供 WAV「cyber_failed_hard_3sec.wav」3.0秒を
+ * MP3 192kbps に変換した src/game/assets/game-over.mp3。2026-11-22 追加）。
+ * 結果発表ジングルと同じ方式: ビルドで dist に出力され Service Worker の
+ * precache に入り、演奏開始時に先読みし、ゲームオーバー確定時に鳴らし始める。
+ * 結果カード（失敗表示）は、音の頭が聞き取れるだけ待ってから出す（出す側の
+ * game-main.ts が、返ってきた長さだけ表示を遅らせる。素材は 3.0 秒あるので、
+ * カードが出たあとも鳴り続ける）。
+ * 効果音オフのときは鳴らさず、長さ 0 を返す（結果は即表示）。
  */
 
 /** ゲームオーバー音を鳴らしてから結果カードを出すまでの長さ (ms) */
 export const GAME_OVER_WAIT_MS = 1500;
 
-/** ゲームオーバー音の譜面（短調の下行4音。最後の音だけ長く残す） */
-export const GAME_OVER_NOTES: JingleNote[] = [
-  { atSec: 0, freq: 329.63, durSec: 0.22, peak: 0.16 },
-  { atSec: 0.19, freq: 261.63, durSec: 0.22, peak: 0.16 },
-  { atSec: 0.38, freq: 220.0, durSec: 0.22, peak: 0.16 },
-  { atSec: 0.57, freq: 164.81, durSec: 0.8, peak: 0.18 },
-];
+/** 演奏開始のときにゲームオーバー素材を先読みしておく（確定の瞬間に鳴らし始めるため） */
+export function preloadGameOverSound(): void {
+  void loadBuffer(gameOverUrl).catch(() => undefined);
+}
 
 /**
- * ゲームオーバー音を鳴らし始めて、結果カードを出すまでの長さ（ms）を返す。
- * 効果音オフ・再生失敗のときは鳴らさず 0 を返す（結果は即表示）。
+ * ゲームオーバー音（素材ファイル）を鳴らし始めて、結果カードを出すまでの
+ * 長さ（ms）を返す。効果音オフのときは鳴らさず 0 を返す（結果は即表示）。
+ * 再生は効果音の出口（hitBus）経由で、曲の再生管理には触らない。
+ * 素材の読み込み・デコードに失敗しても、表示の流れは止めない（待ち時間は返す）。
  */
 export function playGameOverSound(): number {
   if (!enabled) return 0;
   try {
     const ac = audioContext();
     void ac.resume();
-    const startAt = ac.currentTime + 0.02;
-    for (const note of GAME_OVER_NOTES) playJingleNote(note, startAt, hitBus());
+    void loadBuffer(gameOverUrl)
+      .then((buf) => {
+        const src = ac.createBufferSource();
+        src.buffer = buf;
+        src.connect(hitBus());
+        src.start();
+      })
+      .catch(() => undefined);
     document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'gameover' } }));
     return GAME_OVER_WAIT_MS;
   } catch {
@@ -621,17 +613,16 @@ export function playGameOverSound(): number {
 }
 
 /**
- * 結果画面の達成ボイス（NK-S006 試作で追加し、テンプレート v1.8.0 で標準化）。
+ * 結果画面の達成ボイス（オーナー指示 2026-11-22 で追加）。
  * 「フルコンボ！」と「ハイスコア更新！」の2フレーズで、素材は Gemini TTS
  * （gemini-3.8-flash-tts、声 Leda）で生成した音声を MP3 192kbps 化し、
- * ジングルと同水準（約 −13 LUFS）にそろえた src/game/assets/voice-*.mp3 を
- * テンプレートの標準素材として同梱する（汎用フレーズなので作品ごとに
- * 差し替える必要はない。差し替える場合は同名ファイルを置き換える）。
- * ビルドで dist に出力され Service Worker の precache に入り、演奏開始時に
- * 先読みする。
+ * ジングルと同水準（約 −13 LUFS）にそろえた src/game/assets/voice-*.mp3。
+ * ジングル・ゲームオーバー音と同じ方式: ビルドで dist に出力され Service
+ * Worker の precache に入り、演奏開始時に先読みする。
  *
  * 鳴らすタイミング: 結果カードが出る瞬間（ジングルの頭の部分はカード表示の
- * 待ち時間で鳴り終わっている）。両方達成したときは、フルコンボ→
+ * 待ち時間で鳴り終わっており、残りの尾と重なる形。結果表示と合わせて鳴る
+ * ジングル素材の設計と同じ考え方）。両方達成したときは、フルコンボ→
  * ハイスコア更新の順に、前のフレーズが終わってから次を続けて鳴らす。
  * 効果音のオン/オフ設定に従う（隣で鳴るジングルと同じ扱い。オフなら無音で、
  * 結果カードの印だけが出る）。ゲームオーバーの結果では鳴らさない。
@@ -741,95 +732,108 @@ export function playSwipeSound(): void {
   }
 }
 
-
 /**
- * フリックノーツ専用のヒット音は、アプリ内合成で作る（音声ファイルは使わない）。
- * NK-S006 では最終的にオーナー選定の H2 サンプル音源（flick-sample.wav）へ
- * 差し替えたが、その素材は NK-S006 の曲・試聴経緯に紐づくものなので、
- * テンプレートには持ち込まない。代わりに、NK-S006 の初期実装にあった合成方式
- * （v1.4.3「シャキーン」B案）を土台にする: 擦過音（ノイズのバンドパス上掃引）が
- * 下から上へ抜けていき、金属の響き（基本音＋1.5倍＋2倍の倍音が指数減衰する）が
- * 残る、という質感。どの作品の曲にも依存せず、合成なので tier のピッチ変化も
- * そのまま付けられる。
- * 判定別: PERFECT は掃引が最も広く・長く、響きも長い。GREAT は中間、
- * GOOD は掃引が狭く短く、響きも短く鈍い。音量はヒット音サンプルの
- * peak 0.5/0.42/0.32 より控えめにする。
+ * フリックノーツ専用のヒット音は「サンプル音源方式」（v1.4.5 で合成から切り替え）。
+ * 経緯: v1.4.1 で合成（上昇スイープ＋グリッサンド＋きらめき）、v1.4.3 で合成の
+ * 「シャキーン」に作り替えたが、オーナー評価が「しっくりこない」だった。
+ * そのため試聴プレビューで方向性（H: ヒュッ＋キラッ）を絞り、バリエーション
+ * 5案（H2〜H6）からオーナーが選んだ H2（ウッシュ強め＋チャイム1音）を、
+ * コード合成で寄せるのではなく、選ばれた音源そのものを素材として取り込んだ
+ * （オーナーに「聞いたそのままの音で入れる」と伝えてある）。
+ * 素材は src/game/assets/flick-sample.wav（0.35秒・44.1kHz・モノラル、ピーク 0.7）。
+ * MP3 化するとエンコーダ遅延でアタックがずれうるため、ヒット音サンプルと
+ * 同じく WAV のまま取り込む（ビルドで dist に出力され、Service Worker の
+ * precache に入る。workbox の globPatterns に wav あり）。
+ *
+ * 判定・tier のピッチ変化は、サンプルの playbackRate で付ける（合成時代の
+ * flickToneFor は削除した）。PERFECT が素材そのままの音（レート 1）に
+ * 一番近くなるよう、GREAT は −1 半音、GOOD は −2 半音を基準にし、
+ * tier では hitPitchMultiplier（+1 半音/tier、上限 +4）の規則を重ねる。
+ * 音量は、素材ピーク 0.7 に対するゲインで、ヒット音サンプルの出力ピーク
+ * （素材ピーク 0.9 × 0.5/0.42/0.32 ≒ 0.45/0.38/0.29）とほぼ揃う値にした。
  */
-export interface FlickToneParams {
-  /** 擦過音の掃引の開始周波数 (Hz)。tier のピッチ補正はここにかかる */
-  sweepFromHz: number;
-  /** 擦過音の掃引の終了周波数 (Hz) */
-  sweepToHz: number;
-  /** 擦過音の長さ (秒) */
-  sweepSec: number;
-  /** 擦過音の音量 */
+
+/** フリック素材の長さ（秒） */
+export const FLICK_SAMPLE_DURATION_SEC = 0.35;
+
+/** フリック素材1発の鳴らし方（判定・tier から決まる） */
+export interface FlickSampleToneParams {
+  /** 再生レート（ピッチ）。1 で素材そのままの音 */
+  rate: number;
+  /** 音量（素材のピーク 0.7 に対する再生ゲイン） */
   peak: number;
-  /** 金属の響きの基本周波数 (Hz)。倍音は FLICK_RING_PARTIALS の比率で重ねる */
-  ringHz: number;
-  /** 金属の響きの減衰時定数 (秒)。大きいほど響きが長く残る */
-  ringTauSec: number;
-  /** 金属の響きの基本倍音の音量 */
-  ringPeak: number;
 }
 
-export const FLICK_TONE: Record<HitJudge, FlickToneParams> = {
-  perfect: { sweepFromHz: 700, sweepToHz: 6500, sweepSec: 0.22, peak: 0.2, ringHz: 2093, ringTauSec: 0.09, ringPeak: 0.11 },
-  great: { sweepFromHz: 700, sweepToHz: 5600, sweepSec: 0.18, peak: 0.16, ringHz: 2093, ringTauSec: 0.07, ringPeak: 0.09 },
-  good: { sweepFromHz: 650, sweepToHz: 4200, sweepSec: 0.13, peak: 0.11, ringHz: 2093, ringTauSec: 0.045, ringPeak: 0.06 },
+/** 判定ごとのフリック素材の鳴らし方。PERFECT は素材そのまま、GOOD は低く・小さく */
+export const FLICK_SAMPLE: Record<HitJudge, FlickSampleToneParams> = {
+  perfect: { rate: 1, peak: 0.65 },
+  great: { rate: Math.pow(2, -1 / 12), peak: 0.55 },
+  good: { rate: Math.pow(2, -2 / 12), peak: 0.42 },
 };
 
-/** 金属の響きの倍音構成（基本音に対する周波数比と音量比）。金属棒を打ったような非整数次を含む並び */
-export const FLICK_RING_PARTIALS: readonly { ratio: number; amp: number }[] = [
-  { ratio: 1, amp: 1 },
-  { ratio: 1.5, amp: 0.71 },
-  { ratio: 2, amp: 0.48 },
-];
-
 /**
- * 判定と tier から、フリック音のパラメータを決める。tier ではピッチが
- * +1 半音/tier（上限 +4）上がる（合成ヒット音のフォールバックと同じ規則で、
- * logic.ts の hitPitchMultiplier を使う。合成音なのでピッチを変えても音色が壊れない）。
+ * 判定と tier から、フリック素材の鳴らし方を決める。tier ではピッチが
+ * hitPitchMultiplier の規則どおり上がる（音量は変えない）。
  */
-export function flickToneFor(judge: HitJudge, tier: number): FlickToneParams {
-  const base = FLICK_TONE[judge];
-  const mul = hitPitchMultiplier(tier);
-  return {
-    ...base,
-    sweepFromHz: base.sweepFromHz * mul,
-    sweepToHz: base.sweepToHz * mul,
-    ringHz: base.ringHz * mul,
-  };
+export function flickSampleToneFor(judge: HitJudge, tier: number): FlickSampleToneParams {
+  const base = FLICK_SAMPLE[judge];
+  return { rate: base.rate * hitPitchMultiplier(tier), peak: base.peak };
+}
+
+// フリック素材の読み込み（ヒット音サンプルと同じ保持の仕方）。
+// 読み込みに失敗したらフリック音だけ無音にする（フォールバックの合成音は持たない:
+// オーナーが選んだ音そのものが素材なので、別の音で代替しない）。
+let flickBuf: AudioBuffer | undefined;
+let flickState: 'loading' | 'ready' | 'failed' = 'loading';
+let flickLoading: Promise<AudioBuffer> | undefined;
+
+function loadFlickSample(): Promise<AudioBuffer> {
+  if (!flickLoading) {
+    flickLoading = loadBuffer(flickSampleUrl).then(
+      (buf) => {
+        flickBuf = buf;
+        flickState = 'ready';
+        return buf;
+      },
+      (err: unknown) => {
+        flickState = 'failed';
+        throw err;
+      },
+    );
+  }
+  return flickLoading;
+}
+
+/** 演奏開始のときにフリック素材を先読みしておく（最初のフリックで読み込み待ちにならないように） */
+export function preloadFlickSample(): void {
+  void loadFlickSample().catch(() => undefined);
 }
 
 /**
- * フリック音の金属の響きを鳴らす。各倍音を正弦波で、指数減衰
- * （setTargetAtTime の時定数 = ringTauSec）で重ねる。
+ * フリック素材を1発、指定した AudioContext 時刻・出口で鳴らす。
+ * レートでピッチ（と長さ）が変わる以外は素材そのまま（フィルタはかけない）。
+ * バッファがまだ読み込めていない場合は、その1発だけ諦めて読み込みを始める
+ * （演奏開始時に先読みするので、通常は起きない）。
  */
-function playFlickRing(baseHz: number, at: number, tauSec: number, peak: number, out: AudioNode): void {
-  const ac = audioContext();
-  const stopAt = at + tauSec * 8 + 0.05;
-  for (const { ratio, amp } of FLICK_RING_PARTIALS) {
-    const osc = ac.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = baseHz * ratio;
-    const gain = ac.createGain();
-    gain.gain.setValueAtTime(peak * amp, at);
-    gain.gain.setTargetAtTime(0, at, tauSec);
-    osc.connect(gain).connect(out);
-    osc.start(at);
-    osc.stop(stopAt);
+function playFlickSample(tone: FlickSampleToneParams, when: number, out: AudioNode): void {
+  if (!flickBuf) {
+    void loadFlickSample().catch(() => undefined);
+    return;
   }
+  const ac = audioContext();
+  const src = ac.createBufferSource();
+  src.buffer = flickBuf;
+  src.playbackRate.value = tone.rate;
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(tone.peak, when);
+  src.connect(gain).connect(out);
+  src.start(when);
 }
 
 /**
  * フリックノーツに当たった瞬間の専用音。通常ヒット音の代わりに鳴らす
  * （通常ノーツをフリックで叩いたときは従来の playHitSound のまま）。
- * 鳴らし方は flickToneFor のパラメータどおり: 「シャキーン」=
- * 擦過音（ノイズのバンドパス上掃引、スワイプ音より帯域を絞って鋭く）が
- * 下から上へ抜け、金属の響き（playFlickRing）が減衰しながら残る。
- * 擦過音のノイズは使い回しバッファ（0.05秒）をループさせて掃引の全長に届かせる
- * （NK-S006 の合成実装はループなしで、実質アタック部分だけが鳴っていた。
- * テンプレートでは掃引全体が聞こえるよう loop を付ける）。
+ * 鳴らし方は flickSampleToneFor のパラメータどおり（素材＋レート＋音量）。
  */
 export function playFlickSound(judge: HitJudge, tier = 0): void {
   if (!enabled) return;
@@ -837,27 +841,9 @@ export function playFlickSound(judge: HitJudge, tier = 0): void {
     const ac = audioContext();
     // iPhone では操作のあとに resume が必要
     void ac.resume();
-    const tone = flickToneFor(judge, tier);
-    const t = ac.currentTime;
-    const out = hitBus();
-    // 擦過音: ノイズのバンドパス中心を掃引に沿って上へ動かす
-    const noise = ac.createBufferSource();
-    noise.buffer = getNoiseBuffer(ac);
-    noise.loop = true;
-    const band = ac.createBiquadFilter();
-    band.type = 'bandpass';
-    band.Q.value = 2.0;
-    band.frequency.setValueAtTime(tone.sweepFromHz, t);
-    band.frequency.exponentialRampToValueAtTime(tone.sweepToHz, t + tone.sweepSec);
-    const noiseGain = ac.createGain();
-    noiseGain.gain.setValueAtTime(0.0001, t);
-    noiseGain.gain.exponentialRampToValueAtTime(tone.peak, t + tone.sweepSec * 0.25);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, t + tone.sweepSec + 0.03);
-    noise.connect(band).connect(noiseGain).connect(out);
-    noise.start(t);
-    noise.stop(t + tone.sweepSec + 0.05);
-    // 金属の響き: 擦過音と同時に打ち、掃引が抜けたあとも減衰して残る
-    playFlickRing(tone.ringHz, t, tone.ringTauSec, tone.ringPeak, out);
+    if (flickState !== 'failed') {
+      playFlickSample(flickSampleToneFor(judge, tier), ac.currentTime, hitBus());
+    }
     // テストが「どの音が鳴ったか」を確認できるようにイベントを出す
     document.dispatchEvent(new CustomEvent('app:sound', { detail: { kind: 'flick', judge, tier } }));
   } catch {
