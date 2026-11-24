@@ -115,6 +115,49 @@ v6-4 の変更点（ボーカル被覆。根拠は docs/CHART-DESIGN.md の「�
   repair_side_runs）を回し直し、空白が再発したら戻し→修復を最大3回繰り返す。
   最終検証は従来どおり validate() と check-two-thumb.py（違反0で書き出し）。
 
+v6-5 の変更点（バラードプロファイル。曲別メタデータ ballad: True の
+曲だけに効く。ただし被覆ループの「詰み」スキップだけは全曲に効く一般の
+不具合修正で、それ以外の点では未指定の曲は v6-4 と同じ挙動）:
+- 背景: バラードは被覆（v6-4）でも物足りないというオーナー指摘。静かな
+  バラードでは (1) 密度計画が小節 RMS 連動のため歌っている区間まで計画
+  段階で疎になり、(2) レガート歌唱は持続成分のフラックス（ボーカル
+  レイヤーの強さ）が小さく候補ノート自体が生まれにくい（NK-S002
+  『終電のホーム』BPM76: v6-4 後も生成器方式のキャップ超過38件と
+  unfilledGaps 3件が残存し、easy の空白合計は不変だった）。
+- 歌主導の密度計画: 歌詞スパンと重なる小節のうち、有声スロット比率が
+  高くボーカルレイヤーが存在する小節は、計画エネルギー（plan_phrase が
+  見る値）だけをボーカル活動量で底上げする。活動量は有声比率を主信号に
+  ボーカル強度（lay_n vocal の75パーセンタイル）で重み付けする
+  （レガートではフラックス平均が潰れて物差しにならないため）。ゲート
+  （burst/jack の可否）やノーツに残る energy は実測のまま変えない。
+- F0 変化点の候補化: ボーカル F0 の輪郭（持続成分への pyin）を、半音以上
+  の持続的な音程変化で区間分割し（f0_segments）、区間の開始＝変化点を
+  候補ノートとして通常の候補プールに合流させる。合流はフリックの
+  アンカー確定後（アンカー選択には触れない）で、間引き・修復・埋め戻し・
+  被覆・検証の既存工程を通る。フリックの手前窓（最広の easy 2拍）・
+  直後300ms とフリック同刻には置かない（流れ整形・流れ検証でフリックが
+  動かないため）。変化点のスロットに既存ノーツがある場合は作らない。
+- ロングトーンのホールド優先: F0 が安定して持続する区間（目安0.8秒以上）
+  の変化点候補は、ホールド化を試みる。既存ノーツを動かさないため、本体の
+  長押し工程と同じ条件を「競合する既存ノーツが1つも無い場合だけ
+  ホールドにする」形で見る（帯の中の同側ノーツ・同一レーンの尾直後・
+  同時押し時刻またぎ・ホールド同士の重なりがあればタップのまま）。
+- 被覆上限の締め付け: ballad 指定曲の被覆キャップを BALLAD_COVER_GAP_S
+  （easy 2.0秒／normal 1.5秒／hard 1.25秒）にする（通常は 2.5／2.0／1.5）。
+- 被覆ループの「詰み」スキップ（全曲に効く一般修正）: 埋められない空白
+  （持続音のまま終わるアウトロ等）に当たってもスパン全体の補填を諦めず、
+  その空白を「詰み」として次に大きい空白へ進む（v6-4 までは最初の失敗で
+  スパン全体が打ち切られ、埋められる空白まで残っていた。NK-S002
+  『終電のホーム』の試作で残存空白の主因と判明したため、バラードに
+  限らず標準化する）。
+- 不変条件: フリックの位置・個数、入れ子、両親指検証は従来どおり。
+  レポートの balladProfile に区間数・候補数・ホールド化数・底上げ小節数を出す。
+- フリック固定（flick_lock、v6-5 と併用する一般機構）: 密度計画を変えると
+  パターンのレーン配分が連鎖してアンカーのレーンまで動くため、固定したい
+  曲は曲別メタ flick_lock に現行フリック（[時刻ms, レーン, ランク]）を
+  書き、アンカー自動選択の結果をその一覧で置き換える。固定フリックの
+  手前窓では整形が anchor 系ノーツも間引く（「溜め」を確実に作るため）。
+
 v5 の変更点（根拠は docs/CHART-DESIGN.md の「譜面 v5」節、曲別方針は SONGS のメタデータ）:
 - V5-1 特徴量レイヤー: HPSS で打撃成分（ドラム）と持続成分を分け、持続成分の
   旋律帯域（600〜6000Hz）＝メロディ／声帯域（600〜3000Hz）×有声度＝ボーカル
@@ -207,6 +250,12 @@ HOP = 512
 #     ランタイムは v1.7.0 からフリック標準対応）
 #   flick_budget: v6-3 のフリック総数の上限（{"easy": n, "normal": n, "hard": n}。
 #     任意の曲別メタで、未設定なら上限なし。実績のある曲は現行実績を入れる）
+#   ballad: True で v6-5 のバラードプロファイルを使う（chart_v5 が前提。
+#     歌主導の密度計画・F0 変化点の候補化・ロングトーンのホールド優先・
+#     被覆上限の締め付け。詳細は冒頭の v6-5 節）
+#   flick_lock: [時刻ms, レーン, ランク] の一覧（任意）。指定した曲では
+#     アンカー自動選択の結果をこの一覧で置き換え、計画を変えて再生成しても
+#     フリックの位置・レーン・到達難易度が動かないことを保証する
 #   layer_bias: 主レイヤー選択の曲別バイアス（drums / melody / vocal への加算）
 #   chorus_layer: サビ（FEVER）で優先する主レイヤー
 #   chorus_bonus: サビの chorus_layer へのボーナス（既定 0.30）
@@ -238,6 +287,10 @@ SONGS = {
         "chorus_layer": "vocal",
         "chorus_bonus": 0.5,
         "flick_budget": {"easy": 11, "normal": 15, "hard": 28},
+        # v6-5: バラードプロファイルは実測分類で対象外のため明示的に OFF
+        # （2026-11-24 オーナー決定: 有効化は自動判定＋メタ上書き方式となり、
+        # 展開作品では全曲に実測分類どおりの明示メタを記録する）
+        "ballad": False,
     },
     "anata": {
         "title": "あなた",
@@ -250,6 +303,13 @@ SONGS = {
         "chorus_layer": "vocal",
         "chorus_bonus": 0.5,
         "flick_budget": {"easy": 16, "normal": 23, "hard": 30},
+        # v6-5: バラードプロファイル（v1.4.1 で anata のみに適用。NK-S002
+        # 『終電のホーム』試行でオーナー体感確認済みの処理をこの曲にも使う）
+        "ballad": True,
+        # フリック固定: 公開済み（v1.4.0）譜面から導出した現行フリック
+        # [時刻ms, レーン, ランク]（ランク: easy から出る=0／normal から=1／
+        # hard のみ=2）。密度計画が変わってもフリックは動かない
+        "flick_lock": [[5851,1,0],[18065,1,0],[29350,0,0],[35875,1,2],[45047,3,0],[47160,1,2],[51525,0,0],[53708,0,2],[55449,3,1],[57632,1,2],[63716,0,0],[71959,3,0],[75883,0,1],[88491,0,0],[108484,2,1],[111107,3,0],[112634,1,2],[115032,3,1],[121115,0,0],[134583,2,0],[148933,3,0],[159359,1,1],[161518,1,2],[163724,2,0],[167857,1,1],[170690,2,0],[174150,3,1],[176325,0,2],[194119,2,0],[206774,2,0]],
     },
 }
 
@@ -262,6 +322,13 @@ FEVER_GAP_FILL_S = 2.9  # FEVER 区間でこの秒数を超える空白は、間
 VOCAL_COVER_GAP_S = {"easy": 2.5, "normal": 2.0, "hard": 1.5}  # v6-4: 歌詞アクティブ区間で許す空白の上限（秒、難易度別）
 VOCAL_COVER_FLICK_PRE_BEATS = {"easy": 2.0, "normal": 1.5, "hard": 1.0}  # v6-4: フリック手前窓（拍）。補填を入れない範囲（v6-3 と同じ値）
 VOCAL_COVER_FLICK_RECOVERY_MS = 300  # v6-4: フリック後の回復区間（ms）。補填を入れない範囲（v6-3 と同じ値）
+BALLAD_COVER_GAP_S = {"easy": 2.0, "normal": 1.5, "hard": 1.25}  # v6-5: バラードプロファイルの被覆上限（通常より締める）
+BALLAD_VOCAL_ENERGY_MAX = 0.62  # v6-5: 歌主導の密度計画で計画エネルギーを底上げする際の上限
+BALLAD_SUNG_VOICED_RATIO = 0.5  # v6-5: 「歌っている小節」とみなす有声スロット比率の下限
+BALLAD_SUNG_VOCAL_P75 = 0.05  # v6-5: 「歌っている小節」とみなすボーカル強度（lay_n vocal の p75）の下限
+BALLAD_F0_JUMP_SEMITONES = 1.0  # v6-5: F0 区間分割で「持続的な音程変化」とみなす幅（半音）
+BALLAD_F0_CONFIRM_FRAMES = 5  # v6-5: 音程変化の確定に必要な連続フレーム数（hop 512/22050 ≒ 23ms × 5 ≒ 116ms）
+BALLAD_HOLD_MIN_S = 0.8  # v6-5: ロングトーン（変化点候補をホールド優先にする F0 区間）の目安秒数
 DEFAULT_LYRICS_FILE = "src/game/data/lyrics.json"  # v6-4: 歌詞タイミングの既定の入力先（gen-game-lyrics.mjs の生成物）
 DENSITY_FLOOR_RATIO = 0.92  # v6-1.1: 密度下限ガードの下限（候補プール比。thin 目標が最少レーン律速のときだけ発動）
 EIGHTH_BALANCE_W = 2.0  # v6-1.2: フィット時の8分位置だけのレーン分布均衡の重み（全体分布 6.0 の 1/3。normal プールの偏り対策。3.0 では track-b hard のレーン下限を割ったため 2.0）
@@ -534,6 +601,87 @@ def compute_layer_features(y, sr, times):
         "voiced": np.array(voiced_out),
         "harm_rms": _sample_max(harm_rms, times, sr),
     }
+
+
+def f0_segments(y, sr):
+    """ボーカル F0 の輪郭（持続成分への pyin）を音程の持続変化で区間分割する。
+
+    返り値は [(開始秒, 終了秒, 中央値midi), ...]（時刻順）。区間の開始が
+    「変化点」。レガート歌唱では持続成分のフラックス（ボーカルレイヤーの
+    強さ）が小さく候補ノートが生まれにくいため、音程そのものの動きから
+    候補を作るための材料（v6-5 バラードプロファイル）。
+    分割の物差し: 有声フレーム列の中で、区間の中央値から
+    BALLAD_F0_JUMP_SEMITONES（半音）以上ずれた状態が
+    BALLAD_F0_CONFIRM_FRAMES フレーム続いたら変化と確定し、ずれた最初の
+    フレームで区間を切る（ビブラートや推定の暴れを1音として誤検出しない
+    ため）。分割に先立ち、有声ランの中では中央値フィルタ（窓5フレーム
+    ≒0.12秒）で推定の跳ねを均す。短すぎる区間（CONFIRM フレーム未満）は
+    出力しない。
+    """
+    y_harm, _y_perc = librosa.effects.hpss(y)
+    f0_hz, vflag, _vprob = librosa.pyin(
+        y_harm,
+        fmin=librosa.note_to_hz("C2"),
+        fmax=librosa.note_to_hz("C6"),
+        sr=sr,
+        hop_length=HOP,
+    )
+    if f0_hz is None or len(f0_hz) == 0:
+        return []
+    times = librosa.times_like(f0_hz, sr=sr, hop_length=HOP)
+    safe = np.where(np.isfinite(f0_hz) & (f0_hz > 0), f0_hz, 1.0)
+    midi = librosa.hz_to_midi(safe)
+    voiced = np.asarray(vflag, dtype=bool) & np.isfinite(f0_hz) & (f0_hz > 0)
+    # 有声ラン内を中央値フィルタ（窓5）で均し、推定の跳ねによる過分割を抑える
+    midi = midi.copy()
+    run_starts = np.flatnonzero(voiced & ~np.concatenate(([False], voiced[:-1])))
+    run_ends = np.flatnonzero(voiced & ~np.concatenate((voiced[1:], [False]))) + 1
+    for a, b in zip(run_starts, run_ends):
+        if b - a >= 5:
+            vals = midi[a:b]
+            midi[a:b] = [
+                float(np.median(vals[max(0, j - 2) : min(len(vals), j + 3)]))
+                for j in range(len(vals))
+            ]
+    raw_segs = []
+    n = len(midi)
+    i = 0
+    while i < n:
+        if not voiced[i]:
+            i += 1
+            continue
+        run_end = i
+        while run_end < n and voiced[run_end]:
+            run_end += 1
+        start = i
+        buf = [float(midi[i])]
+        pending = None
+        k = i + 1
+        while k < run_end:
+            med = float(np.median(buf))
+            if abs(float(midi[k]) - med) >= BALLAD_F0_JUMP_SEMITONES:
+                if pending is None:
+                    pending = k
+                if k - pending + 1 >= BALLAD_F0_CONFIRM_FRAMES:
+                    raw_segs.append((start, pending))
+                    start = pending
+                    buf = [float(midi[x]) for x in range(pending, k + 1)]
+                    pending = None
+            else:
+                pending = None
+                buf.append(float(midi[k]))
+            k += 1
+        raw_segs.append((start, run_end))
+        i = run_end
+    frame_s = HOP / sr
+    out = []
+    for a, b in raw_segs:
+        if b - a < BALLAD_F0_CONFIRM_FRAMES:
+            continue
+        out.append(
+            (float(times[a]), float(times[b - 1]) + frame_s, float(np.median(midi[a:b])))
+        )
+    return out
 
 
 def _rank_map(values, ref):
@@ -1353,6 +1501,9 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
     # （ゲート・フロアが参照する実効 strength 用）。eff はフレーズの主レイヤーが
     # 決まるたびに差し替える（初期値は全帯域 strength）。
     v5 = bool(meta.get("chart_v5"))
+    # v6-5: バラードプロファイル（曲別メタ ballad: True の曲だけ。v5 特徴量が前提）
+    ballad = bool(meta.get("ballad")) and v5
+    cover_gap_s = BALLAD_COVER_GAP_S if ballad else VOCAL_COVER_GAP_S
     # v6-1.2: sustain_mode 判定の閾値（曲別上書き口。未指定は従来の絶対定数）
     sustain_hi = float(meta.get("sustain_hi", SUSTAIN_HI))
     sustain_lo = float(meta.get("sustain_lo", SUSTAIN_LO))
@@ -1375,6 +1526,29 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
             s["eff"] = s["strength"]
             s["sustain"] = float(min(1.5, harm[i] / harm_p95))
 
+    # v6-5: バラードプロファイルの歌主導の密度計画に使う、小節単位のボーカル
+    # 活動量。対象は歌詞スパンと重なる小節だけ。有声スロット比率を主信号に、
+    # ボーカルレイヤー強度（lay_n vocal の75パーセンタイル）を重みに使う
+    # （レガート歌唱ではフラックスの平均が潰れて物差しにならないため、
+    # 「有声であること」自体を活動の主信号にする）。
+    bar_vocal_act = {}
+    if ballad:
+        _bars = {}
+        for s in playable:
+            _bars.setdefault(s["beat"] // 4, []).append(s)
+        for b, ss in _bars.items():
+            t0 = ss[0]["time"]
+            t1 = ss[-1]["time"] + period / 4
+            if not any(lo <= t1 and t0 < hi for lo, hi in lyric_intervals):
+                continue
+            voiced_ratio = float(
+                np.mean([1.0 if s["voiced"] >= 0.5 else 0.0 for s in ss])
+            )
+            vp75 = float(np.percentile([s["lay_n"]["vocal"] for s in ss], 75))
+            if voiced_ratio < BALLAD_SUNG_VOICED_RATIO or vp75 < BALLAD_SUNG_VOCAL_P75:
+                continue
+            bar_vocal_act[b] = voiced_ratio * (0.35 + 0.65 * min(1.0, vp75 / 0.2))
+
     def assign_layer(pslots, is_chorus, prev_layer):
         return assign_layer_for(meta, pslots, is_chorus, prev_layer)
 
@@ -1392,6 +1566,18 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
 
     def unit_energy(unit):
         return energies.get(unit[0], 0.5)
+
+    def plan_energy(unit):
+        # v6-5: バラードは計画エネルギー（plan_phrase が見る値）だけを歌の
+        # 活動量で底上げする。ゲート（unit_gate が見る unit_energy）や
+        # ノーツに残る energy は実測のまま変えない（速い連打の根拠まで歌で
+        # 水増ししない）。ballad でない曲では unit_energy と完全に同じ。
+        e = unit_energy(unit)
+        if ballad:
+            va = bar_vocal_act.get(unit[0])
+            if va is not None:
+                e = max(e, min(BALLAD_VOCAL_ENERGY_MAX, va))
+        return e
 
     def unit_slots(unit):
         bar, half = unit
@@ -1587,7 +1773,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
                 chorus_first_bars.add(phrase[0])
             units = [(bar, half) for bar in phrase for half in (0, 1)]
             if motif_plan is None:
-                units, plan = plan_phrase(rng, phrase, unit_energy, gate, unit_fever, True, sustain_mode)
+                units, plan = plan_phrase(rng, phrase, plan_energy, gate, unit_fever, True, sustain_mode)
                 motif_plan = plan
             else:
                 plan = [motif_plan[i % len(motif_plan)] for i in range(len(units))]
@@ -1618,7 +1804,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
                 )
             else:
                 _units, plan = plan_phrase(
-                    rng, phrase, unit_energy, gate, unit_fever, False, sustain_mode
+                    rng, phrase, plan_energy, gate, unit_fever, False, sustain_mode
                 )
                 if v5 and len(phrase) >= MOTIF_MIN_BARS:
                     motif_owner[pi] = {
@@ -2077,6 +2263,209 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
             )
         flick_report.sort(key=lambda r: (r["time"], r["lane"]))
 
+    # ---- フリック固定（flick_lock） ----
+    # 曲別メタ flick_lock（[時刻ms, レーン, ランク] の一覧）がある曲では、
+    # アンカー自動選択の結果をその一覧で置き換える。密度計画などを変えて
+    # 再生成してもフリックの位置・レーン・到達難易度が動かないための仕組み。
+    # 一覧の位置にノーツが無ければ再生可能スロットから作り、長押しなら
+    # タップに変える（固定が優先）。以降のピン留め・整形・流れ検証・上限は
+    # 通常どおり、固定されたフリックに対して働く。
+    locked_flick_ids = set()
+    if meta.get("flick") and meta.get("flick_lock"):
+        by_time_lane = {(n["time_ms"], n["lane"]): n for n in notes}
+        for n in notes:
+            n["flick_rank"] = None
+        selected = {}
+        flick_report = []
+        for lt, ll, lr in meta["flick_lock"]:
+            # 固定位置と同刻の他ノーツは外す（公開譜面でフリックは単独の
+            # ノーツ。同刻に同側のノーツが残ると両親指検証 C1「同側ペア」
+            # に触れる）。外した分は導出前のプールから消えるだけに留める
+            notes[:] = [
+                n
+                for n in notes
+                if not (n["time_ms"] == lt and n["lane"] != ll)
+            ]
+            by_time_lane = {(n["time_ms"], n["lane"]): n for n in notes}
+            tgt = by_time_lane.get((lt, ll))
+            if tgt is None:
+                # 一覧の時刻はスナップ後の公開時刻なので、グリッド上の
+                # 最寄りスロットから beat/sub を取り、時刻は一覧の値を保つ
+                slot = min(playable, key=lambda s: abs(s["time"] * 1000 - lt))
+                assert abs(slot["time"] * 1000 - lt) <= 100, (
+                    f"{song_id}: flick_lock の近くにスロットが無い {lt}"
+                )
+                tgt = {
+                    "id": realizer.next_id,
+                    "time_ms": lt,
+                    "lane": ll,
+                    "hold_ms": 0,
+                    "tail_ms": 0,
+                    "kind": "pattern",
+                    "pattern": None,
+                    "unit_rel": (slot["beat"] % 2) * 4 + slot["sub"],
+                    "sub": slot["sub"],
+                    "beat": slot["beat"],
+                    "bar": slot["beat"] // 4,
+                    "strength": slot["strength"],
+                    "sustain": slot.get("sustain", 0.0),
+                    "f0": slot["f0"],
+                    "pitch_lane": slot["pitch_lane"],
+                    "fever": slot["fever"],
+                    "energy": slot["energy"],
+                    "flick_rank": None,
+                }
+                realizer.next_id += 1
+                notes.append(tgt)
+                by_time_lane[(lt, ll)] = tgt
+            if tgt["hold_ms"] > 0:
+                tgt["hold_ms"] = 0
+                tgt["tail_ms"] = 0
+            tgt["flick_rank"] = lr
+            locked_flick_ids.add(tgt["id"])
+            selected[tgt["id"]] = (tgt, "locked", "exact")
+            flick_report.append(
+                {"time": lt, "lane": ll, "reason": "locked", "rank": lr}
+            )
+        flick_report.sort(key=lambda r: (r["time"], r["lane"]))
+        anchor_stats = {"locked": len(meta["flick_lock"]), "rejected": {}}
+
+    # ---- v6-5: F0 変化点の候補化（バラードプロファイル） ----
+    # 合流はフリックのアンカー確定後にする（アンカー選択そのものには触れない）。
+    # 候補は通常の候補プールと同じ土俵（間引き・修復・埋め戻し・被覆・検証）を
+    # 通る。フリックの手前窓（最広の easy 2拍）・直後300ms とフリック同刻には
+    # 置かない（後段の流れ整形・流れ検証でフリックが動かないため）。
+    # 変化点のスロットに既存ノーツがある場合は作らない（その瞬間は既に
+    # ノーツが担っている）。
+    ballad_report = {
+        "enabled": ballad,
+        "f0Segments": 0,
+        "f0Candidates": 0,
+        "f0Holds": 0,
+        "densityBarsLifted": 0,
+    }
+    if ballad:
+        ballad_report["densityBarsLifted"] = sum(
+            1
+            for b, va in bar_vocal_act.items()
+            if min(BALLAD_VOCAL_ENERGY_MAX, va) > energies.get(b, 0.5)
+        )
+        segs = f0_segments(y, sr)
+        ballad_report["f0Segments"] = len(segs)
+        anchor_times = [n["time_ms"] for n in notes if n.get("flick_rank") is not None]
+        pre_ms = VOCAL_COVER_FLICK_PRE_BEATS["easy"] * period * 1000
+        occupied = {(n["beat"], n["sub"]) for n in notes}
+        lane_counts_now = [0, 0, 0, 0]
+        for n in notes:
+            lane_counts_now[n["lane"]] += 1
+        # 既存の長押しの帯（開始ms, 終了ms, レーン）。候補は本体の長押し工程を
+        # 経ていないため、帯の中の同側には候補自体を置かない（生成後の
+        # 事後修復と同じ物差し。検証の「帯の中に同一レーン」もこれで防ぐ）
+        hold_spans_now = [
+            (n["time_ms"], n["time_ms"] + n["hold_ms"], n["lane"])
+            for n in notes
+            if n["hold_ms"] > 0
+        ]
+        slot_times = [s["time"] for s in playable]
+        for t0, t1, seg_midi in segs:
+            k = bisect.bisect_left(slot_times, t0)
+            near = []
+            if k < len(playable):
+                near.append(playable[k])
+            if k > 0:
+                near.append(playable[k - 1])
+            if not near:
+                continue
+            slot = min(near, key=lambda s: abs(s["time"] - t0))
+            if abs(slot["time"] - t0) > period / 4:
+                continue
+            if (slot["beat"], slot["sub"]) in occupied:
+                continue
+            t_ms = int(round(slot["time"] * 1000))
+            if any(
+                ft - pre_ms <= t_ms <= ft + VOCAL_COVER_FLICK_RECOVERY_MS
+                for ft in anchor_times
+            ):
+                continue
+            lane = None
+            for cand_lane in sorted(
+                range(4),
+                key=lambda l: (lane_counts_now[l], abs(l - slot["pitch_lane"]), l),
+            ):
+                if any(
+                    hl // 2 == cand_lane // 2 and a0 < t_ms <= a1
+                    for a0, a1, hl in hold_spans_now
+                ):
+                    continue
+                lane = cand_lane
+                break
+            if lane is None:
+                continue
+            note = {
+                "id": realizer.next_id,
+                "time_ms": t_ms,
+                "lane": lane,
+                "hold_ms": 0,
+                "tail_ms": 0,
+                "kind": "pattern",
+                "pattern": None,
+                "unit_rel": (slot["beat"] % 2) * 4 + slot["sub"],
+                "sub": slot["sub"],
+                "beat": slot["beat"],
+                "bar": slot["beat"] // 4,
+                "strength": slot["strength"],
+                "sustain": slot.get("sustain", 0.0),
+                "f0": float(seg_midi),
+                "pitch_lane": slot["pitch_lane"],
+                "fever": slot["fever"],
+                "energy": slot["energy"],
+            }
+            realizer.next_id += 1
+            # ロングトーン（F0 が安定して持続する区間）ではホールドを優先する。
+            # 既存ノーツを動かさないため、本体の長押し工程と同じ条件を
+            # 「競合する既存ノーツが1つも無い場合だけホールド化する」形で見る
+            seg_dur = t1 - t0
+            if seg_dur >= BALLAD_HOLD_MIN_S:
+                dur_beats = int(min(4, seg_dur / period))
+                tail_beat = slot["beat"] + dur_beats
+                if (
+                    dur_beats >= 1
+                    and seg_dur >= period * 1.15
+                    and tail_beat < len(ext_beats)
+                ):
+                    tail_ms = int(round(float(ext_beats[tail_beat]) * 1000))
+                    if tail_ms - t_ms >= 380 and tail_ms <= (eff_end - 0.3) * 1000:
+                        ok = not any(t_ms < ct <= tail_ms for ct in chord_times)
+                        ok = ok and not any(
+                            not (tail_ms <= a0 or t_ms >= a1)
+                            for a0, a1, _hl in hold_spans_now
+                        )
+                        if ok:
+                            for m in notes:
+                                if m["time_ms"] <= t_ms:
+                                    continue
+                                if (
+                                    m["lane"] == lane
+                                    and m["time_ms"] < tail_ms + period * 500
+                                ):
+                                    ok = False
+                                    break
+                                if (
+                                    m["lane"] // 2 == lane // 2
+                                    and m["time_ms"] <= tail_ms
+                                ):
+                                    ok = False
+                                    break
+                        if ok:
+                            note["hold_ms"] = tail_ms - t_ms
+                            note["tail_ms"] = tail_ms
+                            hold_spans_now.append((t_ms, tail_ms, lane))
+                            ballad_report["f0Holds"] += 1
+            notes.append(note)
+            occupied.add((slot["beat"], slot["sub"]))
+            lane_counts_now[lane] += 1
+            ballad_report["f0Candidates"] += 1
+
     # 難易度への導出（入れ子）
     notes_by_id = {n["id"]: n for n in notes}
     hard_ids = {n["id"] for n in notes}
@@ -2495,16 +2884,22 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
         上位で先に作られた合成ノーツは pool 経由で下位の候補にもなる）。
         """
         ids = set(ids)
-        cap_ms = VOCAL_COVER_GAP_S[diff] * 1000
+        cap_ms = cover_gap_s[diff] * 1000
         pool = [notes_by_id[i] for i in pool_ids if i not in ids]
         for lo, hi in lyric_spans_ms():
-            for _ in range(60):
+            # 埋められない空白（アウトロの持続音など）に当たってもスパン
+            # 全体を諦めず、その空白を「詰み」として印を付け、次に大きい
+            # 空白の補填へ進む（最悪優先＋詰みスキップ。v6-5 の一般修正）
+            dead = set()
+            for _ in range(300):
                 kept_notes = sorted((notes_by_id[i] for i in ids), key=lambda n: n["time_ms"])
                 kept = [n["time_ms"] for n in kept_notes]
                 inside = [t for t in kept if lo <= t < hi]
                 pts = [lo] + inside + [hi]
                 worst = None
                 for a, b in zip(pts, pts[1:]):
+                    if (a, b) in dead:
+                        continue
                     if worst is None or b - a > worst[1] - worst[0]:
                         worst = (a, b)
                 if worst is None or worst[1] - worst[0] <= cap_ms:
@@ -2584,7 +2979,8 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
                         break
                 if not placed:
                     vocal_coverage_stats[diff]["unfilledGaps"] += 1
-                    break
+                    dead.add(worst)
+                    continue
         return ids
 
     # v6-3: フリックのアンカーは難易度導出でピン留めし、修復でも優先的に残す
@@ -2754,9 +3150,17 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
                     nid = n["id"]
                     if nid not in id_sets[diff] or nid in flick_notes or nid in drop_acc:
                         continue
+                    # 固定フリック（flick_lock）の手前窓では、疎な小節頭の
+                    # ノーツ（kind == "anchor"）も間引き対象にして「溜め」を
+                    # 確実に作る（固定フリックが流れ検証で動かないため）
+                    pre_kinds = (
+                        ("pattern", "anchor")
+                        if fn["id"] in locked_flick_ids
+                        else ("pattern",)
+                    )
                     if (
                         t - win_ms <= n["time_ms"] < t
-                        and n["kind"] == "pattern"
+                        and n["kind"] in pre_kinds
                         and n["hold_ms"] == 0
                     ):
                         if not drop_keeps_lane_balance(n):
@@ -2929,6 +3333,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
         budget = meta.get("flick_budget") or {}
         kind_rank = {"exact": 2, "fallback": 1, "outside": 0}
         reason_rank = {
+            "locked": 6,
             "chorus-entry": 5,
             "phrase-head": 4,
             "accent": 3,
@@ -3049,14 +3454,14 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
             else:
                 raise AssertionError(f"{song_id}: 被覆後の修復が収束しない")
             if all(
-                coverage_max_gap_ms(d) <= VOCAL_COVER_GAP_S[d] * 1000
+                coverage_max_gap_ms(d) <= cover_gap_s[d] * 1000
                 for d in ("easy", "normal", "hard")
             ):
                 break
         for d in ("easy", "normal", "hard"):
             after = len(id_sets[d])
             vocal_coverage_report["diffs"][d] = {
-                "gapCapMs": int(VOCAL_COVER_GAP_S[d] * 1000),
+                "gapCapMs": int(cover_gap_s[d] * 1000),
                 "maxGapMsAfter": coverage_max_gap_ms(d),
                 "fromPool": vocal_coverage_stats[d]["fromPool"],
                 "synthesized": vocal_coverage_stats[d]["synthesized"],
@@ -3081,6 +3486,19 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
         out = []
         for n in seq:
             hold = n["hold_ms"]
+            if hold > 0 and any(
+                m is not n
+                and m["lane"] // 2 == n["lane"] // 2
+                and n["time_ms"] < m["time_ms"] <= n["time_ms"] + hold
+                for m in seq
+            ):
+                # NK-S009 anata v1.4.1 ローカル修正: 帯の中に同側のノーツ
+                # （固定フリック含む）がある長押しはタップに戻す。バラード
+                # の密度底上げで譜面が変わると、後段で置かれる flick_lock
+                # と長押しの帯が重なり、validate（同一レーン）と両親指
+                # C2（同側）に触れるため（フリック固定が優先、という
+                # flick_lock の原則どおり）。
+                hold = 0
             if hold > 0 and diff != "hard":
                 tail = n["time_ms"] + hold
                 others = [m for m in seq if m is not n and n["time_ms"] < m["time_ms"] < tail]
@@ -3172,6 +3590,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
         "flickFlowLog": flow_log,
         "flickShapeStats": shape_stats,
         "vocalCoverage": vocal_coverage_report,
+        "balladProfile": ballad_report,
     }
     print(f"{song_id}: BPM={bpm:.2f} -> {int(round(bpm))} counts={counts}")
     print(f"  diffs={json.dumps(rep['diffs'], ensure_ascii=False)} lanes={rep['lanes']}")
@@ -3180,6 +3599,8 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
     if v5:
         print(f"  layers={json.dumps(phrase_layers, ensure_ascii=False)}")
         print(f"  motifReuse={json.dumps(motif_report, ensure_ascii=False)} thr={motif_sim_thr:.3f}")
+    if ballad:
+        print(f"  v6-5 {song_id}: balladProfile={json.dumps(ballad_report, ensure_ascii=False)}")
     return song_json, rep
 
 
