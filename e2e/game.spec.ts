@@ -302,6 +302,80 @@ test('アプリ切替（画面が隠れる）と中断確認が出て、演奏�
   await expect(page.locator('body')).toHaveAttribute('data-game', 'menu');
 });
 
+test('演奏中に音声時計が凍ると中断確認が出て、復帰すれば止めた位置から再開する', async ({ page }) => {
+  await page.goto('/?debug=1');
+  await expect(page.locator('#view-cover')).toBeVisible();
+  await page.locator('#btn-open-game').click();
+  await page.locator('#start-button').click();
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'playing', { timeout: 30_000 });
+  const songMs = (): Promise<number> =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __pwaTest: { getGameState: () => { songMs: number } } }).__pwaTest.getGameState()
+          .songMs,
+    );
+  const setAudio = (audio: string): Promise<void> =>
+    page.evaluate((a) => {
+      const api = (window as unknown as { __pwaTest?: { setGameState?: (p: Record<string, unknown>) => void } })
+        .__pwaTest;
+      api?.setGameState?.({ audio: a });
+    }, audio);
+  // 曲が少し進んでから、時計だけを止める（iOS の音声割り込みで currentTime が
+  // 止まる症状の再現。state は running のまま）
+  await expect.poll(songMs, { timeout: 30_000 }).toBeGreaterThan(300);
+  await setAudio('stick');
+  // 即座にメニューへは戻らず、中断確認カードが出て演奏画面に留まる
+  // （オーナー決定 2026-11-24: 凍結はまずポーズ）
+  await expect(page.locator('#pause-screen')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'paused');
+  await expect(page.locator('#game-screen')).toBeVisible();
+  const frozen = await songMs();
+  expect(frozen).toBeGreaterThan(300);
+  // ポーズ中は位置が進まない
+  await page.waitForTimeout(400);
+  expect(await songMs()).toBe(frozen);
+  // 時計を復帰させる。自動では再開せず、カードは開いたまま
+  await setAudio('unstick');
+  await page.waitForTimeout(500);
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'paused');
+  await expect(page.locator('#pause-screen')).toBeVisible();
+  // 「つづける」で止めた位置から再開する（頭からではない）
+  await page.locator('#pause-resume-button').click();
+  await expect(page.locator('#pause-screen')).toBeHidden();
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'playing', { timeout: 5_000 });
+  await expect.poll(songMs, { timeout: 5_000 }).toBeGreaterThan(frozen);
+  expect(await songMs()).toBeLessThan(frozen + 3_000);
+});
+
+test('音声時計の凍結が長く直らなければ、最後の手段としてメニューへ戻る', async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto('/?debug=1');
+  await expect(page.locator('#view-cover')).toBeVisible();
+  await page.locator('#btn-open-game').click();
+  await page.locator('#start-button').click();
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'playing', { timeout: 30_000 });
+  const songMs = (): Promise<number> =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __pwaTest: { getGameState: () => { songMs: number } } }).__pwaTest.getGameState()
+          .songMs,
+    );
+  await expect.poll(songMs, { timeout: 30_000 }).toBeGreaterThan(300);
+  // resume しても二度と戻らない壊れた context を再現する
+  await page.evaluate(() => {
+    const api = (window as unknown as { __pwaTest?: { setGameState?: (p: Record<string, unknown>) => void } })
+      .__pwaTest;
+    api?.setGameState?.({ audio: 'poison' });
+  });
+  // まずポーズ（中断確認）になる
+  await expect(page.locator('#pause-screen')).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'paused');
+  // 時計が復帰しないまま10秒（FREEZE_PAUSE_ABORT_MS）経過したら、最後の手段として
+  // 作り直してメニューへ戻る
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'menu', { timeout: 30_000 });
+  await expect(page.locator('#menu-screen')).toBeVisible();
+});
+
 test('結果は演奏画面の上に重なって出て、コンボ段階がコンボ数で上がる', async ({ page }) => {
   // デバッグ API（finishNow / setCombo）を使うため ?debug=1 で開き直す
   await page.goto('/?debug=1');
@@ -389,7 +463,10 @@ test('リズムゲーム画面からトップへ戻れる（設定の横の「�
   await expect(page.locator('#menu-screen')).toBeVisible();
 });
 
-test('プレイ中の「戻る」（端スワイプ）では閉じずに中断確認が出て、退出後は履歴が掃除される', async ({ page }) => {
+test('プレイ中の「戻る」（端スワイプ）は無効化されて演奏が続き、退出後は履歴が掃除される', async ({ page }) => {
+  // 曲位置の進行を見るため ?debug=1 で開き直す
+  await page.goto('/?debug=1');
+  await expect(page.locator('#view-cover')).toBeVisible();
   await page.locator('#btn-open-game').click();
   await expect(page.locator('#menu-screen')).toBeVisible();
   // ゲームモード中は、端スワイプ対策の履歴ガードが積まれている
@@ -398,13 +475,25 @@ test('プレイ中の「戻る」（端スワイプ）では閉じずに中断�
     .toBe(true);
   await page.locator('#start-button').click();
   await expect(page.locator('body')).toHaveAttribute('data-game', 'playing', { timeout: 30_000 });
-  // ブラウザの「戻る」＝ Android の端スワイプ「戻る」
+  const songMs = (): Promise<number> =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __pwaTest: { getGameState: () => { songMs: number } } }).__pwaTest.getGameState()
+          .songMs,
+    );
+  await expect.poll(songMs, { timeout: 30_000 }).toBeGreaterThan(300);
+  // ブラウザの「戻る」＝ 端スワイプ「戻る」
   await page.goBack();
-  // アプリは閉じず、ゲーム画面に留まって、中断の確認カードが出る（案1で統一）
+  // アプリは閉じず、確認カードも出ず、演奏が続く（オーナー決定 2026-11-24 で完全無効化）
   await expect(page.locator('body')).toHaveAttribute('data-view', 'game');
-  await expect(page.locator('body')).toHaveAttribute('data-game', 'paused');
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'playing');
+  await expect(page.locator('#pause-screen')).toBeHidden();
+  const atBack = await songMs();
+  await expect.poll(songMs, { timeout: 5_000 }).toBeGreaterThan(atBack);
+  // 中断ボタンからは従来どおり確認カードが出て、メニューに戻れる
+  await page.locator('#game-canvas').dispatchEvent('pointerdown', { clientX: 30, clientY: 29 });
   await expect(page.locator('#pause-screen')).toBeVisible();
-  // 「メニューに戻る」でメニューに戻る
+  await expect(page.locator('body')).toHaveAttribute('data-game', 'paused');
   await page.locator('#pause-abort-button').click();
   await expect(page.locator('body')).toHaveAttribute('data-game', 'menu');
   await expect(page.locator('#menu-screen')).toBeVisible();
@@ -550,7 +639,8 @@ test('判定ラインはタッチ位置「上」固定（H×0.74）で、設定�
   await expect(page.locator('#settings-dialog')).toBeHidden();
 
   // 判定ラインの位置: Canvas の中で「ほぼ白い横帯」が最も広い行の高さ比率を測る。
-  // 判定ラインは幅いっぱいに引かれる白線なので、その行が比率として返る。
+  // 判定ラインはレーン領域の幅いっぱいに引かれる白線なので（2026-11-24 から両脇に
+  // 余白。測定はレーン領域の内側だけを数える）、その行が比率として返る。
   // ただし開始直後は、地の色で消された Canvas に最初のフレームがまだ描かれて
   // いない瞬間があり、そのときは明るい画素が1つも見つからない（bestY = -1）。
   // CI の並行負荷下で実際にこの瞬間を掴んで失敗したため、1回の実測は信じず、
@@ -569,7 +659,8 @@ test('判定ラインはタッチ位置「上」固定（H×0.74）で、設定�
       for (let y = Math.floor(c.height * 0.55); y < c.height * 0.95; y++) {
         let bright = 0;
         let total = 0;
-        for (let x = 0; x < c.width; x += 2) {
+        // レーン領域（両脇の余白を除いた内側）だけを数える
+        for (let x = Math.floor(c.width * 0.06); x < c.width * 0.94; x += 2) {
           const i = (y * c.width + x) * 4;
           total++;
           if (d[i] > 200 && d[i + 1] > 200 && d[i + 2] > 200) bright++;
