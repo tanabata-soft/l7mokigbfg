@@ -225,11 +225,15 @@ v3 の変更点（設計の根拠は docs/CHART-DESIGN.md）:
 前提: .venv に librosa、PATH に ffmpeg（mp3 を wav に変換するため）
 """
 import bisect
+import hashlib
 import json
+import os
+import platform
 import random
 import subprocess
 import sys
 import tempfile
+from importlib import metadata as _importlib_metadata
 from pathlib import Path
 
 import numpy as np
@@ -238,6 +242,106 @@ import librosa
 ROOT = Path(__file__).resolve().parent.parent
 SR = 22050
 HOP = 512
+
+# ---- 単位C（テンプレート v1.14.0）: 生成器の高速化 ----
+# (1) 生成 venv の版数固定: scripts/generate-charts-requirements.txt に
+#     ロックし、生成レポートへ使用ライブラリの版数を記録する（再現ドリフトの
+#     検知用）。(2) HPSS と pyin は compute_layer_features と f0_segments で
+#     同じパラメータで2回計算していたのを compute_hpss_pyin に一本化して
+#     共有する（出力は不変）。(3) その解析結果を、音源波形のハッシュ＋
+#     解析パラメータ＋ライブラリ版数をキーにディスクキャッシュする
+#     （保存先は repo 外の作業領域でもよいよう環境変数 CHART_CACHE_DIR で
+#     差し替え可能。既定は ROOT/.chart-cache で .gitignore 済み、コミット
+#     しない）。--no-cache で無効化できる。(4) 曲単位の並列実行（--jobs N。
+#     曲ごとのシードで決定的なため結果は単独実行と同一）。
+def library_versions():
+    vers = {"python": platform.python_version()}
+    for pkg in ("librosa", "numpy", "scipy", "numba", "soundfile", "soxr", "scikit-learn"):
+        try:
+            vers[pkg] = _importlib_metadata.version(pkg)
+        except Exception:
+            vers[pkg] = "unknown"
+    return vers
+
+
+LIBRARY_VERSIONS = library_versions()
+ANALYSIS_CACHE_ENABLED = True
+ANALYSIS_CACHE_STATS = {"hits": 0, "misses": 0}
+
+
+def _analysis_cache_dir():
+    env = os.environ.get("CHART_CACHE_DIR")
+    return Path(env) if env else (ROOT / ".chart-cache")
+
+
+def _analysis_cache_key(y, sr):
+    h = hashlib.sha256()
+    h.update(np.ascontiguousarray(y, dtype=np.float32).tobytes())
+    params = {
+        "sr": sr,
+        "hop": HOP,
+        "fmin": float(librosa.note_to_hz("C2")),
+        "fmax": float(librosa.note_to_hz("C6")),
+        "versions": LIBRARY_VERSIONS,
+        "kind": "hpss_pyin_v1",
+    }
+    h.update(json.dumps(params, sort_keys=True).encode("utf-8"))
+    return h.hexdigest()
+
+
+def compute_hpss_pyin(y, sr):
+    """HPSS 分離と持続成分への pyin（F0 推定）を1回だけ計算して返す。
+
+    compute_layer_features と f0_segments は従来それぞれ同じパラメータで
+    この計算を繰り返していた（解析時間の9割超の主因）。両者はこの結果を
+    共有する。返り値は dict（y_harm / y_perc / f0_hz / vflag / vprob）。
+    """
+    y_harm, y_perc = librosa.effects.hpss(y)
+    f0_hz, vflag, vprob = librosa.pyin(
+        y_harm,
+        fmin=librosa.note_to_hz("C2"),
+        fmax=librosa.note_to_hz("C6"),
+        sr=sr,
+        hop_length=HOP,
+    )
+    return {"y_harm": y_harm, "y_perc": y_perc, "f0_hz": f0_hz, "vflag": vflag, "vprob": vprob}
+
+
+def get_hpss_pyin(y, sr):
+    """compute_hpss_pyin のキャッシュ付き版。命中時は npz から復元する。"""
+    if not ANALYSIS_CACHE_ENABLED:
+        ANALYSIS_CACHE_STATS["misses"] += 1
+        return compute_hpss_pyin(y, sr)
+    key = _analysis_cache_key(y, sr)
+    cdir = _analysis_cache_dir()
+    cfile = cdir / f"{key}.npz"
+    if cfile.exists():
+        try:
+            with np.load(cfile, allow_pickle=False) as z:
+                out = {k: z[k] for k in ("y_harm", "y_perc", "f0_hz", "vflag", "vprob")}
+            ANALYSIS_CACHE_STATS["hits"] += 1
+            return out
+        except Exception:
+            pass  # 壊れたキャッシュは作り直す
+    ANALYSIS_CACHE_STATS["misses"] += 1
+    out = compute_hpss_pyin(y, sr)
+    if out["f0_hz"] is not None:
+        try:
+            cdir.mkdir(parents=True, exist_ok=True)
+            tmp = cdir / f"{key}.tmp.npz"
+            np.savez(
+                tmp,
+                y_harm=np.asarray(out["y_harm"], dtype=np.float32),
+                y_perc=np.asarray(out["y_perc"], dtype=np.float32),
+                f0_hz=np.asarray(out["f0_hz"], dtype=np.float64),
+                vflag=np.asarray(out["vflag"], dtype=bool),
+                vprob=np.asarray(out["vprob"], dtype=np.float64),
+            )
+            tmp.replace(cfile)
+        except Exception:
+            pass  # キャッシュ保存の失敗は生成を止めない
+    return out
+
 
 # 曲のメタデータ。曲を足すときは、ここに1曲分を足し、src/assets/<id>.mp3 と
 # src/assets/<id>.jpg（ジャケット）を置いて、src/charts.ts の SONGS にも同じ id で
@@ -533,7 +637,7 @@ def _sample_max(series, times, sr):
     return np.array(out)
 
 
-def compute_layer_features(y, sr, times):
+def compute_layer_features(y, sr, times, shared=None):
     """スロット時刻列に対する v5 特徴量を dict で返す（すべて times と同じ長さ）。
 
     drums: 打撃成分（HPSS percussive）のオンセット強度。
@@ -542,8 +646,11 @@ def compute_layer_features(y, sr, times):
     band_*: 全信号の帯域別フラックス（レポート用）。
     f0: pyin の F0（midi。無声・未検出は nan）。voiced: 有声確率。
     harm_rms: 持続成分の RMS（サステイン量。V5-4 用に併記）。
+    shared: compute_hpss_pyin の結果（渡されれば HPSS/pyin を再計算しない）。
     """
-    y_harm, y_perc = librosa.effects.hpss(y)
+    if shared is None:
+        shared = get_hpss_pyin(y, sr)
+    y_harm, y_perc = shared["y_harm"], shared["y_perc"]
     onset_perc = librosa.onset.onset_strength(y=y_perc, sr=sr, hop_length=HOP)
     mag_full = np.abs(librosa.stft(y, n_fft=2048, hop_length=HOP))
     mag_harm = np.abs(librosa.stft(y_harm, n_fft=2048, hop_length=HOP))
@@ -552,13 +659,7 @@ def compute_layer_features(y, sr, times):
     flux_harm_voc = _band_flux(mag_harm, freqs, *VOCAL_BAND)
     bands = {name: _band_flux(mag_full, freqs, lo, hi) for name, (lo, hi) in LAYER_BANDS.items()}
 
-    f0_hz, vflag, vprob = librosa.pyin(
-        y_harm,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C6"),
-        sr=sr,
-        hop_length=HOP,
-    )
+    f0_hz, vflag, vprob = shared["f0_hz"], shared["vflag"], shared["vprob"]
     # pyin の voiced_prob は絶対値が極端に小さい（有声判定フレームでも平均 0.14
     # 程度）ため、そのままでは重みとして使えない。
     # 有声の物差しは voiced_flag（HMM の判定）を使い、±2フレームの移動平均で
@@ -603,7 +704,7 @@ def compute_layer_features(y, sr, times):
     }
 
 
-def f0_segments(y, sr):
+def f0_segments(y, sr, shared=None):
     """ボーカル F0 の輪郭（持続成分への pyin）を音程の持続変化で区間分割する。
 
     返り値は [(開始秒, 終了秒, 中央値midi), ...]（時刻順）。区間の開始が
@@ -618,14 +719,9 @@ def f0_segments(y, sr):
     ≒0.12秒）で推定の跳ねを均す。短すぎる区間（CONFIRM フレーム未満）は
     出力しない。
     """
-    y_harm, _y_perc = librosa.effects.hpss(y)
-    f0_hz, vflag, _vprob = librosa.pyin(
-        y_harm,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C6"),
-        sr=sr,
-        hop_length=HOP,
-    )
+    if shared is None:
+        shared = get_hpss_pyin(y, sr)
+    f0_hz, vflag, _vprob = shared["f0_hz"], shared["vflag"], shared["vprob"]
     if f0_hz is None or len(f0_hz) == 0:
         return []
     times = librosa.times_like(f0_hz, sr=sr, hop_length=HOP)
@@ -1501,6 +1597,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
     # （ゲート・フロアが参照する実効 strength 用）。eff はフレーズの主レイヤーが
     # 決まるたびに差し替える（初期値は全帯域 strength）。
     v5 = bool(meta.get("chart_v5"))
+    shared = None  # 単位C: HPSS/pyin の共有結果（v5 曲だけ計算する）
     # v6-5: バラードプロファイル（曲別メタ ballad: True の曲だけ。v5 特徴量が前提）
     ballad = bool(meta.get("ballad")) and v5
     cover_gap_s = BALLAD_COVER_GAP_S if ballad else VOCAL_COVER_GAP_S
@@ -1508,7 +1605,8 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
     sustain_hi = float(meta.get("sustain_hi", SUSTAIN_HI))
     sustain_lo = float(meta.get("sustain_lo", SUSTAIN_LO))
     if v5:
-        feat = compute_layer_features(y, sr, [s["time"] for s in playable])
+        shared = get_hpss_pyin(y, sr)
+        feat = compute_layer_features(y, sr, [s["time"] for s in playable], shared=shared)
         for layer in ("drums", "melody", "vocal"):
             raw = feat[layer]
             p95 = float(np.percentile(raw, 95)) or 1.0
@@ -2350,7 +2448,7 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
             for b, va in bar_vocal_act.items()
             if min(BALLAD_VOCAL_ENERGY_MAX, va) > energies.get(b, 0.5)
         )
-        segs = f0_segments(y, sr)
+        segs = f0_segments(y, sr, shared=shared)
         ballad_report["f0Segments"] = len(segs)
         anchor_times = [n["time_ms"] for n in notes if n.get("flick_rank") is not None]
         pre_ms = VOCAL_COVER_FLICK_PRE_BEATS["easy"] * period * 1000
@@ -3604,10 +3702,40 @@ def process_song(song_id, meta, y, sr, lyric_intervals=None):
     return song_json, rep
 
 
+def _process_one(task):
+    """1曲分の生成（並列ワーカー兼用）。(song_id, song_json, report) を返す。"""
+    import time
+
+    song_id, meta, explicit_lyrics = task
+    t0 = time.time()
+    hits0 = ANALYSIS_CACHE_STATS["hits"]
+    miss0 = ANALYSIS_CACHE_STATS["misses"]
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / f"{song_id}.wav"
+        to_wav(ROOT / meta["audio"], wav)
+        y, sr = librosa.load(str(wav), sr=SR, mono=True)
+        song_lyrics = (
+            normalize_lyric_intervals(explicit_lyrics, song_id)
+            if explicit_lyrics is not None
+            else None
+        )
+        song_json, rep = process_song(song_id, meta, y, sr, lyric_intervals=song_lyrics)
+    rep["libraryVersions"] = LIBRARY_VERSIONS
+    rep["elapsedSec"] = round(time.time() - t0, 2)
+    rep["analysisCache"] = {
+        "hits": ANALYSIS_CACHE_STATS["hits"] - hits0,
+        "misses": ANALYSIS_CACHE_STATS["misses"] - miss0,
+    }
+    return song_id, song_json, rep
+
+
 def main() -> int:
     # v6-4: --lyrics <path> で歌詞タイミングの入力ファイルを差し替えられる
     # （形式は normalize_lyric_intervals 参照。未指定なら曲別メタデータ／
     # 既定ファイル src/game/data/lyrics.json から解決する）
+    # 単位C: --jobs N で曲単位の並列実行、--no-cache で解析キャッシュ無効化、
+    # --songs id1,id2 で対象曲の絞り込み（検証用）。
+    global ANALYSIS_CACHE_ENABLED
     argv = sys.argv[1:]
     explicit_lyrics = None
     if "--lyrics" in argv:
@@ -3615,21 +3743,35 @@ def main() -> int:
         if not lp.is_absolute():
             lp = ROOT / lp
         explicit_lyrics = json.loads(lp.read_text(encoding="utf-8"))
+    jobs = 1
+    if "--jobs" in argv:
+        jobs = max(1, int(argv[argv.index("--jobs") + 1]))
+    if "--no-cache" in argv:
+        ANALYSIS_CACHE_ENABLED = False
+    only = None
+    if "--songs" in argv:
+        only = [s for s in argv[argv.index("--songs") + 1].split(",") if s]
+    tasks = [
+        (song_id, meta, explicit_lyrics)
+        for song_id, meta in SONGS.items()
+        if only is None or song_id in only
+    ]
+    results = {}
+    if jobs > 1 and len(tasks) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            for song_id, song_json, rep in ex.map(_process_one, tasks):
+                results[song_id] = (song_json, rep)
+    else:
+        for task in tasks:
+            song_id, song_json, rep = _process_one(task)
+            results[song_id] = (song_json, rep)
     out = {}
     report = {}
-    with tempfile.TemporaryDirectory() as td:
-        for song_id, meta in SONGS.items():
-            wav = Path(td) / f"{song_id}.wav"
-            to_wav(ROOT / meta["audio"], wav)
-            y, sr = librosa.load(str(wav), sr=SR, mono=True)
-            song_lyrics = (
-                normalize_lyric_intervals(explicit_lyrics, song_id)
-                if explicit_lyrics is not None
-                else None
-            )
-            song_json, rep = process_song(song_id, meta, y, sr, lyric_intervals=song_lyrics)
-            out[song_id] = song_json
-            report[song_id] = rep
+    for song_id, _meta in SONGS.items():
+        if song_id in results:
+            out[song_id], report[song_id] = results[song_id]
     # 両親指制約の最終検証: 違反が残っていたら書き出さない（チェッカーが正本）
     import importlib.util
 
