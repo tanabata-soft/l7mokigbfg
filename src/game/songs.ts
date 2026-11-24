@@ -3,8 +3,10 @@
 //
 // 1曲ごとに決めるもの:
 // - id: 曲 ID（半角英数の短い名前。譜面・歌詞データのキーになる。公開後に変えない）
-// - audioUrl / jacketUrl: 音源とジャケット。音源は CD 側の MP4 から音声だけを
-//   MP3 192kbps で書き出したもの（src/game/assets/track0N.mp3）、ジャケットは
+// - audioUrl / jacketUrl: 音源とジャケット。音源は制作入口で用意した唯一の
+//   正規音源 MP3 192kbps（src/game/assets/track0N.mp3。CD 側プレイヤーも
+//   同じ音源を src/album/assets/audio/track0N.mp3 として参照し、ビルドでは
+//   内容が同一のため dist 上は1ファイルにまとまる）、ジャケットは
 //   CD 側の曲ジャケット（1024×1024）のコピー。作り方はデジタルCDエンジン
 //   （mmishina-art/digitalcd-engine）docs/PRODUCTION.md の
 //   「リズムゲーム（任意モジュール）」参照
