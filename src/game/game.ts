@@ -97,6 +97,18 @@ const SCORE_FONT = 'bold 18px sans-serif';
 const SCORE_BASELINE_Y = 35;
 /** 中断確認で「つづける」を押してから演奏が戻るまでの READY の時間（壁時計 ms） */
 const RESUME_COUNTDOWN_MS = 1000;
+/**
+ * 凍結が原因のポーズで、時計が復帰しないまま打ち切り（作り直してメニューへ）を
+ * 最後の手段として実行するまでの猶予（壁時計 ms。オーナー決定 2026-11-24）
+ */
+const FREEZE_PAUSE_ABORT_MS = 10_000;
+/**
+ * レーン領域の片側余白（画面／ステージ幅に対する比率。390px 幅で片側約20px）。
+ * 画面端の操作（iOS の左端スワイプ、Android のジェスチャナビゲーション等）の
+ * 誤爆を元から減らすため、レーンを画面端から離す（オーナー決定 2026-11-24）。
+ * 余白は無反応地帯（タッチしても入力にならない）。全端末共通のレイアウト
+ */
+const LANE_MARGIN_RATIO = 20 / 390;
 const JUDGE_LABEL: Record<Judge, string> = { perfect: 'PERFECT', great: 'GREAT', good: 'GOOD', miss: 'MISS' };
 const JUDGE_COLOR: Record<Judge, string> = { perfect: '#ffd166', great: '#4ecdc4', good: '#9aa8ff', miss: '#ff6b6b' };
 
@@ -325,6 +337,14 @@ export class Game {
   private clockSeenAt = 0;
   private clockAdvanceWall = 0;
   private audioFrozen = false;
+  /**
+   * いまのポーズが凍結検知によるものか（オーナー決定 2026-11-24）。手動ポーズ
+   * （中断ボタン・Esc・アプリ切替）と区別し、最後の手段の打ち切りは凍結ポーズ
+   * にだけ適用する
+   */
+  private freezePause = false;
+  /** 凍結ポーズ中、時計が止まり続けている期間の開始壁時計時刻（ms。時計が進み出したら 0 に戻す） */
+  private freezeStuckSince = 0;
   /** READY 中の凍結で開始を初期化し直したか（1回の開始につき1回まで）と、その実行中フラグ */
   private readyReinitUsed = false;
   private reiniting = false;
@@ -367,8 +387,26 @@ export class Game {
   private holdsCompleted = 0;
   private holdsFailed = 0;
 
+  /** レーン領域の左端 x（px）。両脇の余白は無反応地帯 */
+  private laneAreaX(): number {
+    return this.width * LANE_MARGIN_RATIO;
+  }
+
+  /** 1レーンの幅（px） */
+  private laneW(): number {
+    return (this.width - this.laneAreaX() * 2) / 4;
+  }
+
+  /** レーンの左端 x（px） */
+  private laneX(lane: number): number {
+    return this.laneAreaX() + lane * this.laneW();
+  }
+
+  /** x 座標からレーン番号を引く。余白（無反応地帯）では -1 */
   private laneAt(px: number): number {
-    return Math.min(3, Math.max(0, Math.floor(px / (this.width / 4))));
+    const x0 = this.laneAreaX();
+    if (px < x0 || px >= this.width - x0) return -1;
+    return Math.floor((px - x0) / this.laneW());
   }
 
   private onPointerDown = (e: PointerEvent): void => {
@@ -387,6 +425,8 @@ export class Game {
     // オートプレイ中はタップ入力を受け付けない（左上の中断だけ従来どおり効く）
     if (this.autoplay) return;
     const lane = this.laneAt(px);
+    // 両脇の余白は無反応地帯: 押したことにも、ジェスチャの始点にもしない
+    if (lane < 0) return;
     this.pointerLanes.set(e.pointerId, lane);
     this.pointerGestures.set(e.pointerId, { startY: py, startWall: performance.now(), flicked: false });
     try {
@@ -409,6 +449,7 @@ export class Game {
     const gesture = this.pointerGestures.get(e.pointerId);
     if (
       gesture &&
+      prev >= 0 &&
       !gesture.flicked &&
       !this.paused &&
       gesture.startY - py >= FLICK_MIN_UP_PX &&
@@ -420,10 +461,11 @@ export class Game {
     }
     const lane = this.laneAt(px);
     if (lane === prev) return;
-    // 指がレーンをまたいだら、旧レーンは離した扱い、新レーンは押した扱いにする
+    // 指がレーンをまたいだら、旧レーンは離した扱い、新レーンは押した扱いにする。
+    // 余白（-1）へ出たら離した扱いだけにして、余白から戻ったら押し直しとして扱う
+    if (prev >= 0) this.releaseLane(prev);
     this.pointerLanes.set(e.pointerId, lane);
-    this.releaseLane(prev);
-    this.pressLane(lane, px, py);
+    if (lane >= 0) this.pressLane(lane, px, py);
   };
 
   private onPointerUp = (e: PointerEvent): void => {
@@ -431,7 +473,7 @@ export class Game {
     this.pointerGestures.delete(e.pointerId);
     if (lane === undefined) return;
     this.pointerLanes.delete(e.pointerId);
-    if (this.playing) this.releaseLane(lane);
+    if (this.playing && lane >= 0) this.releaseLane(lane);
   };
 
   private onLostPointerCapture = (e: PointerEvent): void => {
@@ -441,7 +483,7 @@ export class Game {
     this.pointerGestures.delete(e.pointerId);
     if (lane === undefined) return;
     this.pointerLanes.delete(e.pointerId);
-    if (this.playing) this.releaseLane(lane);
+    if (this.playing && lane >= 0) this.releaseLane(lane);
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {
@@ -670,6 +712,8 @@ export class Game {
     this.clockSeenAt = nowSeconds();
     this.clockAdvanceWall = performance.now();
     this.audioFrozen = false;
+    this.freezePause = false;
+    this.freezeStuckSince = 0;
     this.readyReinitUsed = false;
     setData('audioFrozen', 'off');
     playBuffer(buf, this.startAt);
@@ -685,7 +729,7 @@ export class Game {
    * 作り直し、READY の残り時間を新しい時計へ引き継いで曲の開始を予約し直す。
    * 曲はまだ始まっていないので、続きからの再開ではなく開始のやり直しになる。
    * 作り直した context がまだ止まっている場合は、次のタップ（pressLane の
-   * unlock）で動き出す。それでも直らなければ凍結検知がメニューへ戻す。
+   * unlock）で動き出す。それでも直らなければ凍結検知がポーズする。
    */
   private async reinitStart(): Promise<void> {
     if (this.reiniting || !this.playing || !this.entry) return;
@@ -705,7 +749,7 @@ export class Game {
       this.clockSeenAt = now;
       this.clockAdvanceWall = performance.now();
     } catch {
-      // 直らなければ次の凍結検知でメニューへ戻す
+      // 直らなければ次の凍結検知でポーズする
     } finally {
       this.reiniting = false;
     }
@@ -739,6 +783,8 @@ export class Game {
     stopCurrent();
     stopAllHoldSounds();
     this.audioFrozen = false;
+    this.freezePause = false;
+    this.freezeStuckSince = 0;
     setData('audioFrozen', 'off');
     setData('game', 'menu');
     this.cb.onAbort();
@@ -748,7 +794,9 @@ export class Game {
    * 演奏を凍結して中断の確認カードを出す（オーナー指示 2026-11-21、案1）。
    * 音はその場で止め、曲位置を覚えておく。再開は resume() → READY をはさんで
    * finishResume() が止めた位置から鳴らし直す（READY 中の初期化し直しと同じ流儀）。
-   * 中断ボタン・端スワイプの「戻る」・アプリ切替のどれからも、ここへ統一する
+   * 中断ボタン・Esc・アプリ切替と、音声時計の凍結検知（pauseFromFreeze）から
+   * ここへ来る。端スワイプ等の「戻る」は、2026-11-24 のオーナー決定で履歴
+   * ガード側（game-main.ts）が無効化だけを行い、ここへは来ない
    */
   pause(): void {
     if (!this.playing || this.paused) return;
@@ -760,6 +808,20 @@ export class Game {
     this.pausePhase = 'confirm';
     setData('game', 'paused');
     this.cb.onPause(true);
+  }
+
+  /**
+   * 音声時計の凍結を検知したときのポーズ（オーナー決定 2026-11-24、2026-11-20 の
+   * 「無理に再開せず初期化再スタート」方針を置き換え）。即座に打ち切らず、通常の
+   * 中断確認と同じカードを出す。曲位置は時計基準で保持されるので、時計が復帰
+   * すれば利用者の「つづける」で止めた位置からそのまま再開できる（自動では
+   * 再開しない）。時計が復帰しないままの打ち切りは、ループ側の最後の手段
+   * （FREEZE_PAUSE_ABORT_MS）が担う
+   */
+  private pauseFromFreeze(): void {
+    this.freezePause = true;
+    this.freezeStuckSince = performance.now();
+    this.pause();
   }
 
   /**
@@ -798,6 +860,8 @@ export class Game {
     this.clockSeenAt = now;
     this.clockAdvanceWall = performance.now();
     this.audioFrozen = false;
+    this.freezePause = false;
+    this.freezeStuckSince = 0;
     setData('audioFrozen', 'off');
     this.paused = false;
     setData('game', 'playing');
@@ -824,9 +888,9 @@ export class Game {
   private laneTapFx(lane: number, rippleX?: number, rippleY?: number): void {
     this.flash[lane] = 1;
     // 押した場所に波紋を出す（キーボードのときはレーンの判定ライン中央）
-    const lw = this.width / 4;
+    const lw = this.laneW();
     this.ripples.push({
-      x: rippleX ?? lane * lw + lw / 2,
+      x: rippleX ?? this.laneX(lane) + lw / 2,
       y: rippleY ?? this.hitY(),
       age: 0,
       life: RIPPLE_LIFE,
@@ -924,13 +988,13 @@ export class Game {
    * レーンのフラッシュと波紋も出して、通常タップと同じ見た目にする。
    */
   private autoPlay(nowMs: number): void {
-    const lw = this.width / 4;
+    const lw = this.laneW();
     for (const n of this.notes) {
       if (n.timeMs - nowMs > 0) break;
       if (n.state !== 0) continue;
       this.flash[n.lane] = 1;
       this.ripples.push({
-        x: n.lane * lw + lw / 2,
+        x: this.laneX(n.lane) + lw / 2,
         y: this.hitY(),
         age: 0,
         life: RIPPLE_LIFE,
@@ -1032,8 +1096,8 @@ export class Game {
   /** ヒット演出: ノーツの膨らむ残像＋広がる輪＋粒子。コンボ tier が高いほど派手 */
   private burst(lane: number, level: 0 | 1 | 2, tier: number): void {
     const fx = tierFx(tier);
-    const lw = this.width / 4;
-    const cx = lane * lw + lw / 2;
+    const lw = this.laneW();
+    const cx = this.laneX(lane) + lw / 2;
     const cy = this.hitY();
     const c = LANE_COLORS[lane];
     this.pops.push({ lane, age: 0, life: POP_LIFE, c, maxScale: 1.5 * fx.popMul });
@@ -1064,8 +1128,8 @@ export class Game {
    */
   private flickBurst(lane: number, level: 0 | 1 | 2, tier: number): void {
     const fx = tierFx(tier);
-    const lw = this.width / 4;
-    const cx = lane * lw + lw / 2;
+    const lw = this.laneW();
+    const cx = this.laneX(lane) + lw / 2;
     const cy = this.hitY();
     const c = LANE_COLORS[lane];
     const n = Math.round((level === 0 ? 14 : level === 1 ? 10 : 7) * fx.particleMul);
@@ -1289,20 +1353,40 @@ export class Game {
       this.audioFrozen = frozen;
       setData('audioFrozen', frozen ? 'on' : 'off');
     }
-    if (frozen) {
+    if (this.paused) {
+      // ポーズ中は凍結検知の対象外（オーナー決定 2026-11-24）: 確認カードの表示中に
+      // 打ち切りがポーズを上書きしないようにする。ただし凍結が原因のポーズに限り、
+      // 時計が復帰しないまま FREEZE_PAUSE_ABORT_MS 経過したら、最後の手段として
+      // 音声の仕組みを作り直してメニューへ戻す。時計が進み出したら猶予は解消する
+      // （ポーズ自体は続き、再開は利用者の「つづける」を待つ）。手動ポーズは対象外
+      if (this.freezePause && this.pausePhase === 'confirm') {
+        if (frozen) {
+          if (this.freezeStuckSince === 0) this.freezeStuckSince = performance.now();
+          if (performance.now() - this.freezeStuckSince > FREEZE_PAUSE_ABORT_MS) {
+            this.resetInput();
+            recreateAudioContext();
+            this.abort();
+            return;
+          }
+        } else {
+          this.freezeStuckSince = 0;
+        }
+      }
+    } else if (frozen) {
       const posSec = frameAt - this.startAt;
       if (posSec > 0.1 || this.readyReinitUsed) {
-        // 演奏が始まった後の凍結は、無理に再開せず初期化してメニューへ戻す
-        // （オーナー指示 2026-11-20: 続きからの再開ではなく初期化再スタートで
-        // よい）。音声の仕組みも作り直して、次のスタートがまっさらな状態から
-        // 始まるようにする。READY の初期化し直しでも直らなかった場合もここへ来る
-        this.resetInput();
-        recreateAudioContext();
-        this.abort();
-        return;
+        // 演奏が始まった後の凍結は、即座に打ち切らずまずポーズする（オーナー決定
+        // 2026-11-24。2026-11-20 の「無理に再開せず初期化再スタート」方針は、
+        // iPhone の音声割り込み（着信・Siri・通知等）でも時計が1.5秒以上止まり、
+        // そのたびに演奏が捨てられてしまうため置き換えた）。READY の初期化
+        // し直しでも直らなかった場合もここへ来る。ここで return してはならない
+        // （ループ末尾の rAF 再予約が飛び、ポーズ後の監視・再開が止まるため）。
+        // このフレームの残りは凍った時計のまま描画されるだけで害はない
+        this.pauseFromFreeze();
+      } else {
+        // READY 中の凍結は、開始そのものを初期化し直す（曲はまだ始まっていない）
+        void this.reinitStart();
       }
-      // READY 中の凍結は、開始そのものを初期化し直す（曲はまだ始まっていない）
-      void this.reinitStart();
     }
     // 経過時間（秒）。タブ復帰などで大きく飛んだときは 50ms に丸める。
     // 凍結中は時刻を止めた位置に固定し、演出の経過時間も進めない
@@ -1444,7 +1528,7 @@ export class Game {
       g.lineWidth = edge.width;
       g.strokeRect(edge.width / 2 + 1, edge.width / 2 + 1, W - edge.width - 2, H - edge.width - 2);
     }
-    const lw = W / 4;
+    const lw = this.laneW();
     const hy = H * HIT_Y_RATIO;
     // このフレームの演出段階（コンボのみで決まる）。フラッシュとコンボ表示に使う
     const frameFx = tierFx(tier);
@@ -1452,28 +1536,29 @@ export class Game {
       if (this.flash[i] > 0) {
         const alpha = Math.min(200, Math.round(this.flash[i] * 70 * frameFx.flashMul));
         g.fillStyle = LANE_COLORS[i] + alpha.toString(16).padStart(2, '0');
-        g.fillRect(i * lw, 0, lw, H);
+        g.fillRect(this.laneX(i), 0, lw, H);
         this.flash[i] = Math.max(0, this.flash[i] - dt * 3.6);
       }
       if (i) {
         g.fillStyle = 'rgba(255,255,255,.12)';
-        g.fillRect(i * lw - 0.5, 0, 1, H);
+        g.fillRect(this.laneX(i) - 0.5, 0, 1, H);
       }
     }
     g.fillStyle = 'rgba(255,255,255,.85)';
-    g.fillRect(0, hy - 2, W, 4);
+    // 判定ラインはレーン領域の幅だけに引く（余白には伸ばさない）
+    g.fillRect(this.laneAreaX(), hy - 2, lw * 4, 4);
     const holdingLane = [false, false, false, false];
     for (const n of this.notes) if (n.holdPhase === 'holding') holdingLane[n.lane] = true;
     for (let i = 0; i < 4; i++) {
       g.strokeStyle = LANE_COLORS[i];
       g.lineWidth = 3;
-      g.strokeRect(i * lw + 8, hy - 14, lw - 16, 28);
+      g.strokeRect(this.laneX(i) + 8, hy - 14, lw - 16, 28);
       if (holdingLane[i]) {
         // 長押し中は判定枠を明るく太くして「押せている」ことを示す
         g.globalAlpha = 0.65 + 0.35 * Math.sin(frameAt * 9);
         g.strokeStyle = '#ffffff';
         g.lineWidth = 2;
-        g.strokeRect(i * lw + 5, hy - 17, lw - 10, 34);
+        g.strokeRect(this.laneX(i) + 5, hy - 17, lw - 10, 34);
         g.globalAlpha = 1;
       }
     }
@@ -1493,7 +1578,7 @@ export class Game {
       // 尾が画面の下端を過ぎるまでは描き続ける。
       if (tailY > H + 40 || headY < -40) continue;
       const c = LANE_COLORS[n.lane];
-      const cx = n.lane * lw + lw / 2;
+      const cx = this.laneX(n.lane) + lw / 2;
       const bw = lw - 36;
       const bottom = n.state === 1 ? hy : headY;
       const bodyTop = tailY + 7;
@@ -1523,12 +1608,12 @@ export class Game {
       // 尾のキャップ
       gn.fillStyle = c;
       gn.beginPath();
-      gn.roundRect(n.lane * lw + 10, tailY - 7, lw - 20, 14, 7);
+      gn.roundRect(this.laneX(n.lane) + 10, tailY - 7, lw - 20, 14, 7);
       gn.fill();
       // 頭のキャップ（未ヒットのときだけ。ヒット後はライン側に吸着する）
       if (n.state === 0) {
         gn.beginPath();
-        gn.roundRect(n.lane * lw + 8, headY - 14, lw - 16, 28, 8);
+        gn.roundRect(this.laneX(n.lane) + 8, headY - 14, lw - 16, 28, 8);
         gn.fill();
       }
     }
@@ -1541,7 +1626,7 @@ export class Game {
         // フリックの印は大きなブロック矢印（↑）だけ（オーナー決定 2026-11-23、確定仕様）。
         // 四角いノーツ本体は描かず、矢印を従来ノーツの中心位置に置く。
         // 塗りはそのレーンの色、縁取りは濃紺。矢印の中心を支点に脈動させる
-        const cx = n.lane * lw + lw / 2;
+        const cx = this.laneX(n.lane) + lw / 2;
         const pulse =
           1 +
           (FLICK_ARROW_PULSE_MAX - 1) *
@@ -1570,7 +1655,7 @@ export class Game {
         gn.restore();
         continue;
       }
-      const nx = n.lane * lw + 8;
+      const nx = this.laneX(n.lane) + 8;
       const nw = lw - 16;
       const nh = 28;
       gn.fillStyle = LANE_COLORS[n.lane];
@@ -1590,7 +1675,7 @@ export class Game {
       gn.globalAlpha = 0.75 * (1 - k);
       gn.fillStyle = p.c;
       gn.beginPath();
-      gn.roundRect(p.lane * lw + lw / 2 - w / 2, hy - h / 2, w, h, 8);
+      gn.roundRect(this.laneX(p.lane) + lw / 2 - w / 2, hy - h / 2, w, h, 8);
       gn.fill();
     }
     this.pops = this.pops.filter((p) => p.age < p.life);

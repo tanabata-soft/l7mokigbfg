@@ -601,14 +601,17 @@ function initGameMode(): { enter: () => void; exit: () => void } {
     onLyric: (index) => showLyric(index),
   });
 
-  // ---- Android の端スワイプ「戻る」対策（v1.2.2、確認カード化は v1.2.7） ----
+  // ---- 端スワイプ・「戻る」対策（v1.2.2、無効化のみは 2026-11-24） ----
   // 端スワイプの「戻る」は OS が最優先で処理するため、発動自体は止められない。
   // 代わりに、ゲームモード中は履歴を1つ積んで popstate を捕捉し、「戻る」が
   // 来てもアプリを閉じさせず・画面遷移もさせずに、この場に留まる。
-  // プレイ中なら、演奏を凍結して中断の確認カードを出す（オーナー指示 2026-11-21、
-  // 案1。中断ボタン・アプリ切替と同じ扱いに統一）。本当にやめる操作（メニュー
-  // 下部の「戻る」ボタン等で CD 側へ出る）ときは exit() が積んだ履歴を取り消し、
-  // 通常の「戻る」に戻す。
+  // 2026-11-21（案1）から 2026-11-23 までは、プレイ中の「戻る」で演奏を凍結して
+  // 中断の確認カードを出していたが、オーナー決定 2026-11-24 で「演奏中の戻るは
+  // 完全無効化」に置き換えた: popstate は状態を問わず消費して積み直すだけで、
+  // カードは出さない（iPhone の左端スワイプがプレイ中に誤って演奏を止めてしまう
+  // ため）。中断の導線は画面内の中断ボタンと Esc に一本化される。本当にやめる
+  // 操作（メニュー下部の「戻る」ボタン等で CD 側へ出る）ときは exit() が積んだ
+  // 履歴を取り消し、通常の「戻る」に戻す。
   let historyGuardArmed = false;
 
   function pushGuardState(): boolean {
@@ -628,7 +631,8 @@ function initGameMode(): { enter: () => void; exit: () => void } {
       historyGuardArmed = false;
       window.removeEventListener('popstate', onPopState);
     }
-    if (game.isPlaying) game.pause();
+    // 「戻る」はここで無効化するだけ（オーナー決定 2026-11-24）。演奏中でも
+    // ポーズや確認カードは出さない
   };
 
   function armHistoryGuard(): void {
@@ -820,6 +824,11 @@ function initGameMode(): { enter: () => void; exit: () => void } {
         const ac = audioContext();
         const fixed = ac.currentTime;
         Object.defineProperty(ac, 'currentTime', { configurable: true, get: () => fixed });
+      }
+      // E2E 用: 'stick' の差し替えを外して時計を復帰させる
+      if (patch.audio === 'unstick') {
+        const ac = audioContext() as unknown as Record<string, unknown>;
+        delete ac['currentTime'];
       }
       renderMenu();
     },
