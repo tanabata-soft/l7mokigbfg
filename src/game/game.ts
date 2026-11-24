@@ -86,6 +86,12 @@ export interface GameCallbacks {
 // Game.hitY() を参照
 const READY_SECONDS = 2;
 /**
+ * ゲームキャンバスの devicePixelRatio 上限（単位E、オーナー決定 2026-11-25）。
+ * DPR 無制限だと DPR3 端末で 9 倍のピクセルを毎フレーム描くため、上限を 1 にする。
+ * 見え方の最終判断はオーナーの実機確認。2 に戻す場合はこの定数だけを変更する。
+ */
+export const MAX_DPR = 1;
+/**
  * 左上の中断ボタン（描画とタップ判定で共有する）。v1.4.9 の上部 UI 見直し
  * （オーナー承認済みのモック）で、「❚❚ 中断」の文字付き横長ボタン（100×38）から
  * ❚❚ アイコンだけの丸ボタン（直径 40px）に変更した。中心は旧ボタンと同じ (30, 29)。
@@ -123,6 +129,8 @@ const LIFE_METER = { meterX: 62, meterY: 25, meterH: 8, scoreGap: 10, edgeGap: 1
 
 /** コンボ段階ごとのベール（暗幕）の濃さ。段階が上がるほど薄くなり、ジャケットが冴える */
 const TIER_VEIL_ALPHA = [0.62, 0.57, 0.52, 0.46, 0.4] as const;
+/** ベールの fillStyle 文字列（毎フレームの文字列生成を避けるため事前計算。単位E） */
+const TIER_VEIL_FILL: readonly string[] = TIER_VEIL_ALPHA.map((a) => `rgba(6,8,16,${a.toFixed(2)})`);
 
 /** コンボ段階ごとの画面の縁の光（tier 0 はなし）。色は TIER_FX の comboColor と揃える */
 const TIER_EDGE: ({ rgb: string; alpha: number; width: number } | null)[] = [
@@ -350,6 +358,19 @@ export class Game {
   private reiniting = false;
   private durationSec = 0;
   private bg: HTMLImageElement | null = null;
+  /** ジャケット背景の事前描画キャッシュ（単位E）。曲開始・リサイズ・画像読込完了で作り直す */
+  private bgCache: HTMLCanvasElement | null = null;
+  private bgCacheW = 0;
+  private bgCacheH = 0;
+  private bgCacheSrc: HTMLImageElement | null = null;
+  /** ビジュアライザーのグラデーションキャッシュ（単位E） */
+  private vizGrad: CanvasGradient | null = null;
+  private vizGradY0 = NaN;
+  private vizGradY1 = NaN;
+  /** スコア文字列と実測幅のキャッシュ（単位E。スコアが変わったときだけ作り直す） */
+  private scoreTextCache = '';
+  private scoreValueCache = -1;
+  private scoreWidthCache = 0;
   private flash = [0, 0, 0, 0];
   /** コンボ段階（tier）の画面演出用: 前フレームの tier と、上がった瞬間のフラッシュ量 */
   private lastTier = 0;
@@ -638,6 +659,8 @@ export class Game {
     // 両キャンバスを地の色へ戻し、背景の参照も外しておく（オーナー指摘
     // 2026-11-21: リズムゲーム開始直後に前の曲の背景が一瞬残る）
     this.bg = null;
+    this.bgCache = null;
+    this.bgCacheSrc = null;
     this.clearCanvases();
     // 歌詞表示（DOM）も前の曲のものが残るため、読み込み前に「歌詞なし」を通知して
     // 消しておく（オーナー指摘 2026-11-21: 背景は消えたが歌詞が残っていた）
@@ -687,6 +710,8 @@ export class Game {
     this.durationSec = buf.duration;
     this.bg = new Image();
     this.bg.src = entry.jacketUrl;
+    this.bgCache = null;
+    this.bgCacheSrc = null;
     // 再生開始の直前にもう一度 resume する（suspended のままだと currentTime が進まず、
     // その場合は復帰した時点でスケジュールどおり鳴り始める）
     await resumeAudio();
@@ -1155,23 +1180,56 @@ export class Game {
    * 横長画面では正方形の一辺を画面の高さに合わせ、横は中央に置く。
    * コンボ演出の背景はこの方式の対象外（従来どおり全面 cover で置き換わる）。
    */
-  private drawJacketBackground(W: number, H: number): void {
+  /** ジャケット背景をオフスクリーンへ事前描画する（単位E）。切り抜き＋下端フェードまで含む */
+  private buildBgCache(W: number, H: number): HTMLCanvasElement | null {
     const img = this.bg;
-    if (!img) return;
-    const { g } = this;
+    if (!img || !img.complete || !img.naturalWidth) return null;
     const iw = img.naturalWidth;
     const ih = img.naturalHeight;
     const inset = Math.min(this.entry?.frameInset ?? 0, iw / 4, ih / 4);
     const side = Math.min(W, H);
     const dx = (W - side) / 2;
-    g.drawImage(img, inset, inset, iw - inset * 2, ih - inset * 2, dx, 0, side, side);
+    const cache = document.createElement('canvas');
+    // キャッシュは実ピクセル（MAX_DPR 適用後）で作り、内部は CSS 単位で描く
+    const d = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+    cache.width = Math.max(1, Math.round(W * d));
+    cache.height = Math.max(1, Math.round(H * d));
+    const cg = cache.getContext('2d');
+    if (!cg) return null;
+    cg.setTransform(d, 0, 0, d, 0, 0);
+    cg.drawImage(img, inset, inset, iw - inset * 2, ih - inset * 2, dx, 0, side, side);
     // 下端を下地へ溶かす
     const fadeH = side * 0.18;
-    const grad = g.createLinearGradient(0, side - fadeH, 0, side);
+    const grad = cg.createLinearGradient(0, side - fadeH, 0, side);
     grad.addColorStop(0, 'rgba(14,16,24,0)');
     grad.addColorStop(1, 'rgba(14,16,24,1)');
-    g.fillStyle = grad;
-    g.fillRect(dx, side - fadeH, side, fadeH);
+    cg.fillStyle = grad;
+    cg.fillRect(dx, side - fadeH, side, fadeH);
+    this.bgCache = cache;
+    this.bgCacheW = W;
+    this.bgCacheH = H;
+    this.bgCacheSrc = img;
+    return cache;
+  }
+
+  private drawJacketBackground(W: number, H: number): void {
+    const img = this.bg;
+    if (!img) return;
+    let cache = this.bgCache;
+    if (!cache || this.bgCacheW !== W || this.bgCacheH !== H || this.bgCacheSrc !== img) {
+      cache = this.buildBgCache(W, H);
+    }
+    if (cache) this.g.drawImage(cache, 0, 0, W, H);
+  }
+
+  /** スコア文字列（7桁ゼロ埋め）のキャッシュ */
+  private scoreText(): string {
+    if (this.scoreValueCache !== this.score) {
+      this.scoreValueCache = this.score;
+      this.scoreTextCache = String(this.score).padStart(7, '0');
+      this.scoreWidthCache = 0;
+    }
+    return this.scoreTextCache;
   }
 
 
@@ -1224,7 +1282,9 @@ export class Game {
     // バーの右端は、右端のスコアに重ならない位置まで。
     // スコアは右端 (W - edgeGap) に右寄せで出るので、その実測幅の分を空ける
     g.font = SCORE_FONT;
-    const scoreW = g.measureText(String(this.score).padStart(7, '0')).width;
+    const scoreTxt = this.scoreText();
+    if (!this.scoreWidthCache) this.scoreWidthCache = g.measureText(scoreTxt).width;
+    const scoreW = this.scoreWidthCache;
     const barRight = W - M.edgeGap - scoreW - M.scoreGap;
     const mx = M.meterX;
     const mw = Math.max(0, barRight - mx);
@@ -1283,9 +1343,15 @@ export class Game {
     const vals = groupFreqBins(freq, VISUALIZER_FREQ_BARS, sampleRate);
     const slot = (x1 - x0) / vals.length;
     const bw = slot * 0.62;
-    const grad = g.createLinearGradient(0, y1, 0, y0);
-    grad.addColorStop(0, VIZ_BAR_BOTTOM);
-    grad.addColorStop(1, VIZ_BAR_TOP);
+    if (!this.vizGrad || this.vizGradY0 !== y0 || this.vizGradY1 !== y1) {
+      const grad = g.createLinearGradient(0, y1, 0, y0);
+      grad.addColorStop(0, VIZ_BAR_BOTTOM);
+      grad.addColorStop(1, VIZ_BAR_TOP);
+      this.vizGrad = grad;
+      this.vizGradY0 = y0;
+      this.vizGradY1 = y1;
+    }
+    const grad = this.vizGrad;
     for (let i = 0; i < vals.length; i++) {
       const h = Math.max(2, vals[i] * bandH * 0.92);
       const x = x0 + i * slot + (slot - bw) / 2;
@@ -1302,7 +1368,7 @@ export class Game {
   }
 
   private fit(): void {
-    const d = window.devicePixelRatio || 1;
+    const d = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
     if (w !== this.width || h !== this.height || this.canvas.width !== Math.round(w * d)) {
@@ -1314,6 +1380,9 @@ export class Game {
       this.notesCanvas.width = Math.round(w * d);
       this.notesCanvas.height = Math.round(h * d);
       this.gn.setTransform(d, 0, 0, d, 0, 0);
+      // サイズが変わったら背景キャッシュとグラデーションを作り直す
+      this.bgCache = null;
+      this.vizGrad = null;
     }
   }
 
@@ -1475,7 +1544,7 @@ export class Game {
       this.drawJacketBackground(W, H);
     }
     // ベール（暗幕）はコンボ段階が上がるほど薄くし、ジャケットが冴えてくる
-    g.fillStyle = `rgba(6,8,16,${TIER_VEIL_ALPHA[tier].toFixed(2)})`;
+    g.fillStyle = TIER_VEIL_FILL[tier];
     g.fillRect(0, 0, W, H);
     // コンボ演出の登場中は、絵を背景として敷く。レーン・ノーツはこの後に描くので、
     // ノーツは常にはっきり手前に見える（全面カットインのように絵がノーツへ被る形にはしない）。
@@ -1819,7 +1888,7 @@ export class Game {
     g.fillRect(PAUSE_BTN.cx + 2, PAUSE_BTN.cy - 8, 5, 16);
     g.font = SCORE_FONT;
     g.textAlign = 'right';
-    g.fillText(String(this.score).padStart(7, '0'), W - 14, SCORE_BASELINE_Y);
+    g.fillText(this.scoreText(), W - 14, SCORE_BASELINE_Y);
     // 曲の進行バー（最上端 3px）。経過分の色は金から白に変えた
     // （金色のランクメーターと並ぶと紛らわしいため、v1.4.9 の見直し）
     g.fillStyle = 'rgba(255,255,255,.2)';
