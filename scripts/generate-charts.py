@@ -375,7 +375,7 @@ def get_hpss_pyin(y, sr):
 #     「持続的」。既定 0.50。sustain_lo: 持続度がこれ以下で「打撃的」。既定 0.30）
 SONGS = {
     # NK-S009『Flavor』の収録曲。音源は src/game/assets/track0N.mp3
-    # （CD 側の MP4 から音声だけを MP3 192kbps で書き出したもの）。
+    # （制作入口で用意した唯一の正規音源 MP3 192kbps。CD 側プレイヤーも同じ音源を共有する）。
     # FEVER（サビ）区間は、歌詞（src/album/sync.ts）の反復ブロックから決める:
     # サビの歌詞ブロックの先頭行の開始秒を開始、末尾行の歌唱が終わる頃を終了とする
     # （NK-S003 での決め方）。

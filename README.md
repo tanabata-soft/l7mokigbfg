@@ -21,7 +21,7 @@
   - `tracks.ts`: 曲目・解説（正本）
   - `sync.ts`: 歌詞の同期データ（生成物。歌詞のない曲は空配列）
   - `media.ts`: 曲ごとの画像・音源の対応
-  - `assets/`: 画像と音源（mp4）。`jacket.jpg` / `back.jpg` / `bg.jpg` と `trackNN.jpg` / `trackNN.mp4` の固定スロット
+  - `assets/`: 画像と音源（mp3）。`jacket.jpg` / `back.jpg` / `bg.jpg` と `trackNN.jpg` / `trackNN.mp3` の固定スロット
 - `docs/`: 仕様・手順・引き継ぎ書式・ジャケット様式の調査（DESIGN-STUDY）
 - `e2e/` / `tests/`: 画面テストと単体テスト（同梱の期待値は雛形作品＝シングル形態用）
 

@@ -17,7 +17,7 @@ PWA アプリ(ツール/ゲーム)の共通テンプレート。**新しいア�
 - **バージョン表示は裏面ノートの下部、インストール入口は表ジャケットと裏面ノートの2か所に置く。** シングル形態にはブックレットが無いため(アルバム形態ではブックレット末尾に置く)。`check:dist` は DOM に要素があるかで判定するので適合する。
 - **記録を持たないアプリなので、`src/storage.ts`・`src/backup.ts`(バックアップ UI)・`src/sound.ts`(効果音)は持たない。** 保存するのはデバッグモードのオン/オフだけ(`src/debug.ts` が自分のキーで管理)。
 - **アイコンは表ジャケットの絵から作った PNG を正本として `public/icons/` に置く。** `scripts/make-icons.mjs` は図形生成ではなく寸法チェックのみ(作り直し手順は同ファイルのコメント参照)。maskable は絵を中央 80% に置き、周囲をテーマ色で埋めた専用品。
-- **音源(mp4)は事前キャッシュに入れない。** Service Worker の実行時キャッシュ(CacheFirst + レンジ要求対応、キャッシュ名は `vite.config.ts` の `AUDIO_CACHE`。雛形では `template-single-audio`)に、初回起動時に全曲を一括ダウンロードする(`src/download.ts`)。画像は事前キャッシュに含める。
+- **音源(mp3)は事前キャッシュに入れない。** Service Worker の実行時キャッシュ(CacheFirst + レンジ要求対応、キャッシュ名は `vite.config.ts` の `AUDIO_CACHE`。雛形では `template-single-audio`)に、初回起動時に全曲を一括ダウンロードする(`src/download.ts`)。画像は事前キャッシュに含める。
 - **ストレージの永続化を要求する。** 音源キャッシュがブラウザの容量整理で消えないよう、起動時と一括ダウンロード完了時に `navigator.storage.persist()` を要求する(`src/pwa.ts` の `requestPersistentStorage`。対応環境のみ・ベストエフォートで、失敗しても動作は止めない)。
 - **プレビュー(`npm run build:preview`)は、音源を 96kbps に再エンコードしてから埋め込む**(単一 HTML が重くなりすぎるため。`scripts/build-preview.mjs` の差し替えプラグイン。ffmpeg が無い環境では元の音源のまま)。
 - **歌詞データ `src/album/sync.ts` は生成物。** 各 mp4 に収められた字幕をもとに生成する(生成手順は `docs/PRODUCTION.md` の「素材の用意」)。曲目の正本は `src/album/tracks.ts` で、キーと曲数の整合は `scripts/content-checks.mjs`(sync-keys / media-count)と `tests/data.test.ts` が確かめる。歌詞のない曲は空配列にし、sync-keys は空配列のキーも数える。
